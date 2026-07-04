@@ -1,0 +1,23 @@
+name: flutter_usb_printer_example
+description: Demonstrates how to use the flutter_usb_printer plugin.
+
+publish_to: 'none'
+
+environment:
+  sdk: '>=3.9.2 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  flutter_usb_printer:
+    path: ../
+
+  cupertino_icons: ^1.0.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true

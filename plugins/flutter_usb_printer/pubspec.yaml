@@ -1,0 +1,24 @@
+name: flutter_usb_printer
+description: This plugin will allow develop send data and work with usb printer on android
+version: 0.3.1
+homepage: https://github.com/kechankrisna/flutter_usb_printer
+
+environment:
+  sdk: '>=3.9.2 <4.0.0'
+  flutter: '>=3.41.9'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: app.mylekha.client.flutter_usb_printer
+        pluginClass: FlutterUsbPrinterPlugin

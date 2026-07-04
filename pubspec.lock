@@ -195,6 +195,13 @@ packages:
     description: flutter
     source: sdk
     version: "0.0.0"
+  flutter_usb_printer:
+    dependency: "direct main"
+    description:
+      path: "plugins/flutter_usb_printer"
+      relative: true
+    source: path
+    version: "0.3.1"
   flutter_web_plugins:
     dependency: transitive
     description: flutter

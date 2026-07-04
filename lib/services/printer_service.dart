@@ -45,7 +45,7 @@ class PrinterService extends ChangeNotifier {
   }
 
 
-  Future<void> printBill(Map<String, dynamic> data) async {
+  /*Future<void> printBill(Map<String, dynamic> data) async {
     if (_writeCharacteristic == null) {
       print("No printer connected");
       return;
@@ -70,6 +70,73 @@ class PrinterService extends ChangeNotifier {
       PosColumn(text: 'Total', width: 3, styles: const PosStyles(align: PosAlign.right, bold: true)),
     ]);
 
+    if (data['items'] != null && data['items'] is List) {
+      for (var item in data['items']) {
+        bytes += generator.row([
+          PosColumn(text: item['name'] ?? '', width: 7),
+          PosColumn(text: '${item['qty'] ?? 1}', width: 2, styles: const PosStyles(align: PosAlign.right)),
+          PosColumn(text: '${item['total'] ?? 0.0}', width: 3, styles: const PosStyles(align: PosAlign.right)),
+        ]);
+      }
+    }
+
+    bytes += generator.hr();
+
+    // Total
+    bytes += generator.row([
+      PosColumn(text: 'TOTAL', width: 8, styles: const PosStyles(bold: true)),
+      PosColumn(text: '${data['total_amount'] ?? 0.0}', width: 4, styles: const PosStyles(align: PosAlign.right, bold: true)),
+    ]);
+
+    bytes += generator.feed(2);
+    bytes += generator.cut();
+
+    await _sendBytes(bytes);
+  }*/
+
+  Future<void> printBill(Map<String, dynamic> data) async {
+    if (_writeCharacteristic == null) {
+      print("No printer connected");
+      return;
+    }
+
+    // --- STATIC TESTING DATA ---
+    // If the passed data is empty, populate it with mock receipt data
+    if (data.isEmpty) {
+      data = {
+        'order_id': 'BTL-2026-9874',
+        'items': [
+          {'name': 'Double Cheeseburger', 'qty': 2, 'total': 15.00},
+          {'name': 'Large French Fries', 'qty': 1, 'total': 4.50},
+          {'name': 'Vanilla Milkshake', 'qty': 2, 'total': 8.00},
+          {'name': 'Extra Dipping Sauce', 'qty': 3, 'total': 1.50},
+        ],
+        'total_amount': 29.00
+      };
+    }
+
+    // ---------------------------
+    final profile = await CapabilityProfile.load();
+    final generator = Generator(PaperSize.mm58, profile);
+    List<int> bytes = [];
+
+
+    // Receipt Header
+    bytes += generator.text('BETALIA CASHIER',
+        styles: const PosStyles(align: PosAlign.center, bold: true, height: PosTextSize.size2, width: PosTextSize.size2));
+    if (data['order_id'] != null) {
+      bytes += generator.text('Order ID: ${data['order_id']}', styles: const PosStyles(align: PosAlign.center));
+    }
+    bytes += generator.hr();
+
+    // Items Header
+    bytes += generator.row([
+      PosColumn(text: 'Item', width: 7, styles: const PosStyles(bold: true)),
+      PosColumn(text: 'Qty', width: 2, styles: const PosStyles(align: PosAlign.right, bold: true)),
+      PosColumn(text: 'Total', width: 3, styles: const PosStyles(align: PosAlign.right, bold: true)),
+    ]);
+
+    // Printing Items List
     if (data['items'] != null && data['items'] is List) {
       for (var item in data['items']) {
         bytes += generator.row([
