@@ -289,7 +289,13 @@ class UsbPrinterService extends ChangeNotifier {
       bytes += generator.cut();
 
       // Output raw structural byte buffers directly down to the serial device channel stream
-      await _usbPrinter.write(Uint8List.fromList(bytes));
+      try {
+        await _usbPrinter.write(Uint8List.fromList(bytes));
+      } catch (e) {
+        debugPrint("UsbPrinterService: USB write failed: $e");
+        // Re-throw to be caught by outer catch
+        rethrow;
+      }
       await Future.delayed(const Duration(milliseconds: 500));
 
     } on PlatformException catch (e) {
@@ -298,27 +304,18 @@ class UsbPrinterService extends ChangeNotifier {
       debugPrint("Error printing USB bill: $e");
     }
   }*/
-  Future<void> printBill(Map<String, dynamic> data) async {
+  /// Prints a receipt to the connected USB thermal printer.
+  /// Returns true if the print was sent successfully, false otherwise.
+  Future<bool> printBill(Map<String, dynamic> data) async {
     if (!_isConnected) {
-      debugPrint("No USB printer connected");
-      return;
+      debugPrint("UsbPrinterService: No USB printer connected");
+      return false;
     }
 
-    // --- STATIC TESTING DATA ---
-    // If the passed data is empty or missing items, populate it with mock receipt data
-    if (data.isEmpty || data['items'] == null) {
-      data = {
-        'order_id': 'BTL-USB-9874',
-        'items': [
-          {'name': 'Double Cheeseburger', 'qty': 2, 'total': 15.00},
-          {'name': 'Large French Fries', 'qty': 1, 'total': 4.50},
-          {'name': 'Vanilla Milkshake', 'qty': 2, 'total': 8.00},
-          {'name': 'Extra Dipping Sauce', 'qty': 3, 'total': 1.50},
-        ],
-        'total_amount': 29.00
-      };
+    if (data.isEmpty) {
+      debugPrint("UsbPrinterService: Empty receipt data - nothing to print");
+      return false;
     }
-    // ---------------------------
 
     try {
       final profile = await CapabilityProfile.load();
@@ -365,13 +362,16 @@ class UsbPrinterService extends ChangeNotifier {
       bytes += generator.cut();
 
       await _usbPrinter.write(Uint8List.fromList(bytes));
-
       await Future.delayed(const Duration(milliseconds: 500));
 
+      debugPrint("UsbPrinterService: Receipt sent to USB printer successfully");
+      return true;
     } on PlatformException catch (e) {
-      debugPrint("Platform Error writing to USB printer: ${e.message}");
+      debugPrint("UsbPrinterService: Platform Error writing to USB printer: ${e.message}");
+      return false;
     } catch (e) {
-      debugPrint("Error printing USB bill: $e");
+      debugPrint("UsbPrinterService: Error printing USB bill: $e");
+      return false;
     }
   }
 }

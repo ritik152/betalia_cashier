@@ -17,7 +17,7 @@ android {
 
     defaultConfig {
         applicationId = "com.example.betalia_cashier"
-        minSdk = flutter.minSdkVersion
+        minSdk = 24
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
@@ -60,6 +60,10 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
     implementation("com.google.zxing:core:3.5.3")
     implementation("com.github.mik3y:usb-serial-for-android:3.7.0")
+    
+    // Required by PaymentSDK (from POM)
+    implementation("org.jetbrains.kotlin:kotlin-android-extensions-runtime:1.6.0")
+    implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.6.0")
     
     // Core Android Libraries
     implementation("androidx.core:core-ktx:1.12.0")
