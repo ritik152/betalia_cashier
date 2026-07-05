@@ -22,8 +22,8 @@
 -dontwarn **.databinding.**
 
 # Keep serializable PSDK objects
--keepclassmembers class * extends com.verifone.payment_sdk.Status implements java.io.Serializable { *; }
--keepclassmembers class * extends com.verifone.payment_sdk.StatusInformation implements java.io.Serializable { *; }
+-keepclassmembers class * extends com.verifone.payment_sdk.Status { *; }
+-keepclassmembers class * extends com.verifone.payment_sdk.StatusInformation { *; }
 
 # Keep PSDK event classes for reflection
 -keep class com.verifone.payment_sdk.PaymentCompletedEvent { *; }

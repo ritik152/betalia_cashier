@@ -113,14 +113,14 @@ class MainActivity : FlutterActivity() {
 
                 // Add port if specified (default P630 port is typically 16101 or 8082)
                 if (port.isNotBlank()) {
-                    paramMap[PsdkDeviceInformation.DEVICE_PORT_KEY] = port.trim()
+                    paramMap[TransactionManager.DEVICE_PORT_KEY] = port.trim()
                 }
 
                 // Step 3: Create the commerce listener
                 val initListener = object : CommerceListenerAdapter() {
                     override fun handleStatus(status: Status) {
-                        Log.d("Verifone", "Initialize status: code=${status.status}, msg=${status.message}")
-                        if (status.status == StatusCode.SUCCESS) {
+                        Log.d("Verifone", "Initialize status: code=${status.getStatus()}, msg=${status.getMessage()}")
+                        if (status.getStatus() == StatusCode.SUCCESS) {
                             isInitialized = true
                             Log.i("Verifone", "PSDK Initialized successfully!")
 
@@ -137,11 +137,11 @@ class MainActivity : FlutterActivity() {
                             }
                         } else {
                             isInitialized = false
-                            val errMsg = "Init failed: ${status.message} (${status.status})"
+                            val errMsg = "Init failed: ${status.getMessage()} (${status.getStatus()})"
                             Log.e("Verifone", errMsg)
                             runOnUiThread {
                                 showToast(errMsg)
-                                flutterResult.error("INIT_FAILED", status.message, status.status.toString())
+                                flutterResult.error("INIT_FAILED", status.getMessage(), status.getStatus().toString())
                             }
                         }
                     }
@@ -179,11 +179,11 @@ class MainActivity : FlutterActivity() {
                 val credentials = LoginCredentials.createWith2(null, null, null, null)
                 val status = tm.loginWithCredentials(credentials)
 
-                if (status.status == StatusCode.SUCCESS) {
+                if (status.getStatus() == StatusCode.SUCCESS) {
                     Log.i("Verifone", "Login request sent successfully")
                     // LOGIN_COMPLETED will come via the commerce listener
                 } else {
-                    Log.e("Verifone", "Login request failed: ${status.message}")
+                    Log.e("Verifone", "Login request failed: ${status.getMessage()}")
                 }
             } catch (e: Exception) {
                 Log.e("Verifone", "Login exception", e)
@@ -214,12 +214,12 @@ class MainActivity : FlutterActivity() {
                 val transaction = Transaction.create()
                 val status = tm.startSession2(transaction)
 
-                if (status.status == StatusCode.SUCCESS) {
+                if (status) {
                     Log.i("Verifone", "StartSession2 request sent successfully")
-                    // SESSION_STARTED event will come via the commerce listener
+                    // TRANSACTION_STARTED event will come via the commerce listener
                 } else {
-                    Log.e("Verifone", "StartSession2 failed: ${status.message}")
-                    showToast("Session start failed: ${status.message}")
+                    Log.e("Verifone", "StartSession2 failed")
+                    showToast("Session start failed")
                 }
             } catch (e: Exception) {
                 Log.e("Verifone", "Start session exception", e)
@@ -305,11 +305,11 @@ class MainActivity : FlutterActivity() {
                     val txn = Transaction.create()
                     txn.currency = currency
                     val sessionStatus = tm.startSession2(txn)
-                    if (sessionStatus.status != StatusCode.SUCCESS) {
-                        val errMsg = sessionStatus.message ?: "Failed to start session"
+                    if (!sessionStatus) {
+                        val errMsg = "Failed to start session"
                         Log.e("Verifone", "Session start failed: $errMsg")
                         runOnUiThread {
-                            flutterResult.error("SESSION_FAILED", errMsg, sessionStatus.status.toString())
+                            flutterResult.error("SESSION_FAILED", errMsg, null)
                         }
                         paymentSdk?.removeListener(paymentListener)
                         pendingTransactionLock.set(false)
@@ -338,12 +338,12 @@ class MainActivity : FlutterActivity() {
 
                 val startStatus = tm.startPayment(payment)
 
-                if (startStatus.status != StatusCode.SUCCESS) {
-                    val failMsg = startStatus.message ?: "Could not start payment"
+                if (startStatus.getStatus() != StatusCode.SUCCESS) {
+                    val failMsg = startStatus.getMessage() ?: "Could not start payment"
                     Log.e("Verifone", "startPayment failed: $failMsg")
                     runOnUiThread {
                         showToast("Payment Failed: $failMsg")
-                        flutterResult.error("START_FAILED", failMsg, startStatus.status.toString())
+                        flutterResult.error("START_FAILED", failMsg, startStatus.getStatus().toString())
                     }
                     paymentSdk?.removeListener(paymentListener)
                     endSessionQuietly()
@@ -367,46 +367,50 @@ class MainActivity : FlutterActivity() {
         return object : CommerceListenerAdapter() {
 
             override fun handleTransactionEvent(event: TransactionEvent) {
-                Log.d("Verifone", "Transaction event: ${event.type}, status: ${event.status}")
+                Log.d("Verifone", "Transaction event: ${event.getType()}, status: ${event.getStatus()}")
 
-                when (event.type) {
+                when (event.getType()) {
                     TransactionEvent.LOGIN_COMPLETED -> {
-                        if (event.status == StatusCode.SUCCESS) {
+                        if (event.getStatus() == StatusCode.SUCCESS) {
                             isLoggedIn = true
                             Log.i("Verifone", "Login completed successfully")
+                            showToast("Login Successful")
                         } else {
-                            Log.w("Verifone", "Login failed: ${event.message}")
-                            showToast("Login failed: ${event.message}")
+                            Log.w("Verifone", "Login failed: ${event.getMessage()}")
+                            showToast("Login failed: ${event.getMessage()}")
                         }
                     }
-                    TransactionEvent.SESSION_STARTED -> {
-                        if (event.status == StatusCode.SUCCESS) {
+                    TransactionEvent.TRANSACTION_STARTED -> {
+                        if (event.getStatus() == StatusCode.SUCCESS) {
                             isSessionOpen = true
                             Log.i("Verifone", "Session started successfully")
+                            showToast("Session Started")
                         } else {
-                            Log.w("Verifone", "Session start failed: ${event.message}")
-                            showToast("Session start failed: ${event.message}")
+                            Log.w("Verifone", "Session start failed: ${event.getMessage()}")
+                            showToast("Session start failed: ${event.getMessage()}")
                         }
                     }
-                    TransactionEvent.SESSION_ENDED -> {
+                    TransactionEvent.TRANSACTION_ENDED -> {
                         isSessionOpen = false
                         Log.d("Verifone", "Session ended")
+                        showToast("Session Ended")
                     }
                     TransactionEvent.LOGOUT_COMPLETED -> {
                         isLoggedIn = false
                         Log.d("Verifone", "Logout completed")
+                        showToast("Logout Completed")
                     }
                 }
             }
 
             override fun handlePaymentCompletedEvent(event: PaymentCompletedEvent) {
-                Log.d("Verifone", "PaymentCompleted: status=${event.status}, type=${event.type}")
+                Log.d("Verifone", "PaymentCompleted: status=${event.getStatus()}, type=${event.getType()}")
 
                 paymentSdk?.removeListener(this)
                 pendingTransactionLock.set(false)
 
-                if (event.status == StatusCode.SUCCESS) {
-                    val payment = event.payment
+                if (event.getStatus() == StatusCode.SUCCESS) {
+                    val payment = event.getPayment()
                     val authResult = payment?.getAuthResult()
 
                     Log.i("Verifone", "Payment successful. AuthResult: $authResult")
@@ -424,7 +428,7 @@ class MainActivity : FlutterActivity() {
                             )
                         }
                     } else if (authResult == AuthorizationResult.DECLINED) {
-                        val declineMsg = payment?.getDeclineMessage() ?: "Transaction Declined"
+                        val declineMsg = payment?.getAuthResponseText() ?: "Transaction Declined"
                         runOnUiThread {
                             showToast("DECLINED: $declineMsg")
                             flutterResult.error("DECLINED", declineMsg, "DECLINED")
@@ -442,20 +446,20 @@ class MainActivity : FlutterActivity() {
                     endSessionQuietly()
 
                 } else {
-                    val errorMsg = event.message ?: "Payment failed"
-                    Log.e("Verifone", "Payment failed: $errorMsg (${event.status})")
+                    val errorMsg = event.getMessage() ?: "Payment failed"
+                    Log.e("Verifone", "Payment failed: $errorMsg (${event.getStatus()})")
                     runOnUiThread {
                         showToast("Payment Error: $errorMsg")
-                        flutterResult.error("PAYMENT_FAILED", errorMsg, event.status.toString())
+                        flutterResult.error("PAYMENT_FAILED", errorMsg, event.getStatus().toString())
                     }
                     endSessionQuietly()
                 }
             }
 
             override fun handleStatus(status: Status) {
-                Log.d("Verifone", "SDK Status: code=${status.status}, msg=${status.message}")
-                if (status.status != StatusCode.SUCCESS && status.status != 0) {
-                    Log.w("Verifone", "Non-success status: ${status.message}")
+                Log.d("Verifone", "SDK Status: code=${status.getStatus()}, msg=${status.getMessage()}")
+                if (status.getStatus() != StatusCode.SUCCESS && status.getStatus() != 0) {
+                    Log.w("Verifone", "Non-success status: ${status.getMessage()}")
                 }
             }
         }
@@ -488,7 +492,7 @@ class MainActivity : FlutterActivity() {
             }
 
             val deviceInfo = paymentSdk?.getDeviceInformation()
-            val state = deviceInfo?.getDeviceState()
+            val state = deviceInfo?.getState()
 
             val statusStr = when (state) {
                 PaymentDeviceState.CONNECTED -> "CONNECTED"
@@ -500,7 +504,7 @@ class MainActivity : FlutterActivity() {
                 else -> "UNKNOWN"
             }
 
-            val ip = deviceInfo?.getIpAddress() ?: terminalIpAddress
+            val ip = deviceInfo?.getAddress() ?: terminalIpAddress
             val serial = deviceInfo?.getSerialNumber() ?: ""
 
             result.success(
