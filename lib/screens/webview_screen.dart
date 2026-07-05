@@ -84,6 +84,8 @@ class _WebViewScreenState extends State<WebViewScreen> {
             });
             // Inject terminal config if available
             _injectTerminalConfig();
+            // Inject Test Payment Button
+            _injectTestPaymentButton();
           },
         ),
       )
@@ -95,6 +97,37 @@ class _WebViewScreenState extends State<WebViewScreen> {
   // ================================================================
   // TERMINAL CONFIGURATION
   // ================================================================
+
+  /// Injects a floating "TEST PAY 5 NOK" button for standalone payment testing.
+  void _injectTestPaymentButton() {
+    final js = '''
+(function() {
+  if (document.getElementById('__verifone_test_btn')) return;
+  var btn = document.createElement('button');
+  btn.id = '__verifone_test_btn';
+  btn.innerText = 'TEST PAY 5 NOK';
+  btn.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:99999;' +
+    'padding:14px 24px;background:#4CAF50;color:white;border:none;' +
+    'border-radius:12px;font-size:16px;font-weight:bold;' +
+    'box-shadow:0 4px 12px rgba(0,0,0,0.3);cursor:pointer;';
+  btn.onclick = function() {
+    try {
+      NativeBridge.postMessage(JSON.stringify({
+        type: 'PAYMENT',
+        payload: { amount: 5, currency: 'NOK' }
+      }));
+      btn.innerText = 'PROCESSING...';
+      btn.style.background = '#FF9800';
+      setTimeout(function() { btn.innerText = 'TEST PAY 5 NOK'; btn.style.background = '#4CAF50'; }, 5000);
+    } catch(e) {
+      alert('Error: ' + e.message);
+    }
+  };
+  document.body.appendChild(btn);
+})();
+''';
+    controller.runJavaScript(js);
+  }
 
   /// Injects stored terminal IP config into the WebView so the frontend
   /// knows where to connect.
@@ -108,42 +141,75 @@ class _WebViewScreenState extends State<WebViewScreen> {
     }
   }
 
-  /// Loads saved terminal IP from SharedPreferences and auto-connects.
+  /// Loads saved terminal IP and auto-connects. Falls back to hardcoded test IP.
   Future<void> _loadSavedIpAndConnect() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final savedIp = prefs.getString('verifone_terminal_ip');
       final savedPort = prefs.getString('verifone_terminal_port');
 
-      if (savedIp != null && savedIp.isNotEmpty) {
-        _terminalIpAddress = savedIp;
-        _terminalPort = savedPort ?? '';
-        debugPrint('Auto-connecting to saved terminal: $savedIp');
+      String ipToUse;
+      String portToUse;
 
-        final String result = await platform.invokeMethod('configureTerminal', {
-          'ipAddress': savedIp,
-          'port': savedPort ?? '',
-        });
+      // Hardcoded client P630 IP for testing
+      ipToUse = '192.168.86.55';
+      portToUse = '';
 
-        debugPrint('Auto-connect result: $result');
-        if (mounted && result == 'CONNECTED') {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Verifone connected: $savedIp'),
-              backgroundColor: Colors.green,
-              duration: const Duration(seconds: 2),
-            ),
-          );
-        }
-      } else {
-        // No saved IP — show the IP config dialog after a brief delay
-        debugPrint('No saved terminal IP — showing configuration dialog');
-        await Future.delayed(const Duration(seconds: 2));
-        if (mounted) _showManualIpDialog();
+      _terminalIpAddress = ipToUse;
+      _terminalPort = portToUse;
+      debugPrint('Connecting to terminal: $ipToUse');
+
+      final String result = await platform.invokeMethod('configureTerminal', {
+        'ipAddress': ipToUse,
+        'port': portToUse,
+      });
+
+      debugPrint('Connect result: $result');
+      final connected = result == 'CONNECTED';
+
+      // Update the test button to reflect connection state
+      _updateTestButtonState(connected, ipToUse);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(connected
+                ? 'Verifone connected: $ipToUse'
+                : 'Verifone: $result'),
+            backgroundColor: connected ? Colors.green : Colors.orange,
+            duration: const Duration(seconds: 3),
+          ),
+        );
       }
     } catch (e) {
-      debugPrint('Error loading saved IP: $e');
+      debugPrint('Error connecting to terminal: $e');
+      _updateTestButtonState(false, e.toString());
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Connection error: $e'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      }
     }
+  }
+
+  /// Updates the injected TEST PAY button with connection state.
+  void _updateTestButtonState(bool connected, String message) {
+    final color = connected ? '#4CAF50' : '#F44336';
+    final text = connected ? 'TEST PAY 5 NOK' : 'CONN FAILED - Tap Retry';
+    final title = connected ? 'TEST PAY 5 NOK' : 'CONN FAILED - Tap Retry';
+    final js = '''
+(function() {
+  var btn = document.getElementById('__verifone_test_btn');
+  if (!btn) return;
+  btn.innerText = '$title';
+  btn.style.background = '$color';
+})();
+''';
+    controller.runJavaScript(js);
   }
 
   /// Saves the terminal IP to SharedPreferences for future auto-connect.
@@ -367,6 +433,31 @@ class _WebViewScreenState extends State<WebViewScreen> {
 
   void _startPayment(Map<String, dynamic> data) async {
     try {
+      // CHECK TERMINAL STATUS FIRST — prevent crash when not connected
+      final String statusJson = await platform.invokeMethod('checkTerminalStatus');
+      final statusResult = jsonDecode(statusJson);
+      final connected = statusResult['status'] == 'CONNECTED';
+
+      if (!connected) {
+        debugPrint('Payment blocked — terminal not connected');
+        _sendToWebView('onPaymentResult', {
+          'success': false,
+          'status': 'NOT_CONNECTED',
+          'error': 'Terminal not connected. Please configure the P630 first.',
+        });
+        _updateTestButtonState(false, 'NOT_CONNECTED');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Terminal not connected. Cannot process payment.'),
+              backgroundColor: Colors.orange,
+              duration: Duration(seconds: 4),
+            ),
+          );
+        }
+        return;
+      }
+
       // Extract amount from payload - supports various data shapes from the webview
       final payload = data['payload'] ?? data;
       final amount = (payload['amount'] ?? payload['totalAmount'] ?? payload['totalPrice'] ?? 0.0).toDouble();

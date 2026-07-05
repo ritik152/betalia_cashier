@@ -24,6 +24,9 @@ class MainActivity : FlutterActivity() {
     private var terminalIpAddress: String = ""
     private var pendingTransactionLock = AtomicBoolean(false)
 
+    // Pending flutter result while we wait for init/login
+    private var pendingFlutterResult: MethodChannel.Result? = null
+
     // Coroutine exception handler — prevents crashes
     private val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
         Log.e("Verifone", "Unhandled coroutine exception", throwable)
@@ -37,8 +40,97 @@ class MainActivity : FlutterActivity() {
 
     private val psdkScope = CoroutineScope(Dispatchers.IO + SupervisorJob() + exceptionHandler)
 
+    // ── COMMERCE LISTENER (matching reference app: transactionManager at top, STATUS_INITIALIZED check) ──
+    private lateinit var commerceListener: CommerceListenerAdapter
+
+    private fun createCommerceListener() {
+        commerceListener = object : CommerceListenerAdapter() {
+            override fun handleStatus(status: Status) {
+                try {
+                    // TOP of handleStatus: ALWAYS get transactionManager (matches reference app line 299)
+                    transactionManager = paymentSdk?.transactionManager
+                    Log.d("Verifone", "Status: type=${status.type}, code=${status.status}, msg=${status.message}")
+
+                    // Match reference app: check STATUS_INITIALIZED type
+                    if (status.type == Status.STATUS_INITIALIZED) {
+                        if (status.status == StatusCode.SUCCESS) {
+                            isInitialized = true
+                            Log.i("Verifone", "PSDK Initialized!")
+                            loginToTerminal()
+                            runOnUiThread {
+                                showToast("Verifone Connected")
+                                pendingFlutterResult?.success("CONNECTED")
+                                pendingFlutterResult = null
+                            }
+                        } else if (status.status == StatusCode.CONFIGURATION_REQUIRED) {
+                            // Terminal needs first-time pairing — launch Verifone config UI
+                            Log.w("Verifone", "Configuration required — launching pairing UI")
+                            runOnUiThread {
+                                try {
+                                    val activity = this@MainActivity
+                                    paymentSdk?.displayConfiguration(commerceListener, activity)
+                                    showToast("Select P630 terminal from the list")
+                                } catch (e: Exception) {
+                                    Log.e("Verifone", "displayConfiguration failed", e)
+                                    showToast("Pairing error: ${e.localizedMessage}")
+                                }
+                            }
+                            runOnUiThread {
+                                pendingFlutterResult?.success("CONFIG_REQUIRED")
+                                pendingFlutterResult = null
+                            }
+                        } else {
+                            isInitialized = false
+                            val errMsg = status.message ?: "Init failed"
+                            Log.e("Verifone", "$errMsg (${status.status})")
+                            runOnUiThread {
+                                showToast(errMsg)
+                                pendingFlutterResult?.error("INIT_FAILED", errMsg, status.status.toString())
+                                pendingFlutterResult = null
+                            }
+                        }
+                    } else if (status.type == Status.STATUS_TEARDOWN) {
+                        isInitialized = false
+                        transactionManager = null
+                        Log.d("Verifone", "PSDK Teardown complete")
+                    }
+                } catch (e: Exception) {
+                    Log.e("Verifone", "Error in handleStatus", e)
+                    runOnUiThread {
+                        pendingFlutterResult?.error("INIT_ERROR", e.localizedMessage, null)
+                        pendingFlutterResult = null
+                    }
+                }
+            }
+
+            override fun handleTransactionEvent(event: TransactionEvent) {
+                try {
+                    Log.d("Verifone", "TxEvent: type=${event.type}, status=${event.status}")
+                    // Track login/session state
+                } catch (e: Exception) {
+                    Log.e("Verifone", "Error in handleTransactionEvent", e)
+                }
+            }
+
+            override fun handlePaymentCompletedEvent(event: PaymentCompletedEvent) {
+                try {
+                    Log.d("Verifone", "PaymentCompleted: status=${event.status}, msg=${event.message}")
+                    pendingTransactionLock.set(false)
+                    endSessionQuietly()
+                } catch (e: Exception) {
+                    Log.e("Verifone", "Error in handlePaymentCompletedEvent", e)
+                    pendingTransactionLock.set(false)
+                }
+            }
+        }
+    }
+
+    // ── FLUTTER BRIDGE ──────────────────────────────────────────────────────
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+
+        createCommerceListener()
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
             .setMethodCallHandler { call, result ->
@@ -60,13 +152,16 @@ class MainActivity : FlutterActivity() {
                         "endSession" -> {
                             endVerifoneSession(result)
                         }
+                        "displayConfig" -> {
+                            displayVerifoneConfig(result)
+                        }
                         "disconnect" -> {
                             disconnectTerminal(result)
                         }
                         else -> result.notImplemented()
                     }
                 } catch (e: Throwable) {
-                    Log.e("Verifone", "Unexpected error in MethodChannel handler", e)
+                    Log.e("Verifone", "MethodChannel error", e)
                     showToast("System Error: ${e.localizedMessage}")
                     try { result.error("UNEXPECTED_ERROR", e.localizedMessage, null) } catch (_: Exception) {}
                 }
@@ -74,7 +169,27 @@ class MainActivity : FlutterActivity() {
     }
 
     // ================================================================
-    // INITIALIZATION
+    // DISPLAY CONFIGURATION (P630 pairing screen)
+    // ================================================================
+
+    private fun displayVerifoneConfig(flutterResult: MethodChannel.Result) {
+        runOnUiThread {
+            try {
+                if (paymentSdk == null) {
+                    paymentSdk = PaymentSdk.create(this)
+                }
+                paymentSdk?.displayConfiguration(commerceListener, this)
+                showToast("Select P630 terminal from the list")
+                flutterResult.success("DISPLAYING_CONFIG")
+            } catch (e: Exception) {
+                Log.e("Verifone", "displayConfiguration failed", e)
+                flutterResult.error("CONFIG_ERROR", e.localizedMessage, null)
+            }
+        }
+    }
+
+    // ================================================================
+    // INITIALIZATION (matching reference app initializeWithIpAddress)
     // ================================================================
 
     private fun configureAndInitializeTerminal(
@@ -88,64 +203,24 @@ class MainActivity : FlutterActivity() {
         }
         terminalIpAddress = ip.trim()
         Log.i("Verifone", "Configuring terminal at $terminalIpAddress")
+        pendingFlutterResult = flutterResult
 
         psdkScope.launch {
             try {
-                // Tear down previous instance if exists
-                if (paymentSdk != null) {
-                    Log.d("Verifone", "Tearing down previous SDK instance...")
-                    try { paymentSdk?.tearDown() } catch (_: Exception) {}
-                    delay(500)
+                // Create PaymentSdk ONCE (matches reference app: val paymentSdk = PaymentSdk.create(context))
+                if (paymentSdk == null) {
+                    paymentSdk = PaymentSdk.create(this@MainActivity)
+                    Log.d("Verifone", "PaymentSdk created")
                 }
 
-                // Step 1: Create PaymentSdk
-                paymentSdk = PaymentSdk.create(this@MainActivity)
-                Log.d("Verifone", "PaymentSdk created")
-
-                // Step 2: Build TCP/IP connection params
-                val paramMap: HashMap<String, String> = hashMapOf(
-                    PsdkDeviceInformation.DEVICE_CONNECTION_TYPE_KEY to "tcpip",
-                    PsdkDeviceInformation.DEVICE_ADDRESS_KEY to terminalIpAddress
+                // Build TCP/IP config (matches reference app line 132-134)
+                val config: HashMap<String, String> = hashMapOf(
+                    PsdkDeviceInformation.DEVICE_ADDRESS_KEY to terminalIpAddress,
+                    PsdkDeviceInformation.DEVICE_CONNECTION_TYPE_KEY to "tcpip"
                 )
 
-                // Step 3: Create commerce listener
-                val initListener = object : CommerceListenerAdapter() {
-                    override fun handleStatus(status: Status) {
-                        try {
-                            Log.d("Verifone", "Init status: code=${status.status}")
-                            if (status.status == StatusCode.SUCCESS) {
-                                isInitialized = true
-                                Log.i("Verifone", "PSDK Initialized successfully!")
-
-                                transactionManager = paymentSdk?.transactionManager
-                                Log.d("Verifone", "TransactionManager: ${transactionManager != null}")
-
-                                loginToTerminal()
-
-                                runOnUiThread {
-                                    showToast("Verifone Terminal Connected")
-                                    flutterResult.success("CONNECTED")
-                                }
-                            } else {
-                                isInitialized = false
-                                val errMsg = status.message ?: "Init failed"
-                                Log.e("Verifone", "$errMsg (${status.status})")
-                                runOnUiThread {
-                                    showToast(errMsg)
-                                    flutterResult.error("INIT_FAILED", errMsg, status.status.toString())
-                                }
-                            }
-                        } catch (e: Exception) {
-                            Log.e("Verifone", "Error in init listener", e)
-                            runOnUiThread {
-                                flutterResult.error("INIT_ERROR", e.localizedMessage, null)
-                            }
-                        }
-                    }
-                }
-
-                paymentSdk?.addListener(initListener)
-                paymentSdk?.initializeFromValues(initListener, paramMap)
+                // initializeFromValues (matches reference app line 139)
+                paymentSdk?.initializeFromValues(commerceListener, config)
                 Log.d("Verifone", "initializeFromValues called with IP: $terminalIpAddress")
 
             } catch (e: Exception) {
@@ -169,13 +244,10 @@ class MainActivity : FlutterActivity() {
                     Log.e("Verifone", "Cannot login — TransactionManager is null")
                     return@launch
                 }
-                val credentials = LoginCredentials.createWith2(null, null, null, null)
-                val status = tm.loginWithCredentials(credentials)
-                if (status.status == StatusCode.SUCCESS) {
-                    Log.i("Verifone", "Login request sent successfully")
-                } else {
-                    Log.e("Verifone", "Login request failed: ${status.message}")
-                }
+                // Matches reference app line 61: LoginCredentials.createWith2("username", "password", "shift", null)
+                val credentials = LoginCredentials.createWith2("username", null, null, null)
+                tm.loginWithCredentials(credentials)
+                Log.i("Verifone", "Login request sent")
             } catch (e: Exception) {
                 Log.e("Verifone", "Login exception", e)
             }
@@ -207,7 +279,6 @@ class MainActivity : FlutterActivity() {
                 }
                 tm.endSession()
                 isSessionOpen = false
-                Log.i("Verifone", "EndSession called")
                 runOnUiThread { flutterResult.success("SESSION_ENDED") }
             } catch (e: Exception) {
                 Log.e("Verifone", "End session exception", e)
@@ -231,7 +302,6 @@ class MainActivity : FlutterActivity() {
                 isInitialized = false
                 isLoggedIn = false
                 isSessionOpen = false
-                Log.i("Verifone", "Terminal disconnected")
                 runOnUiThread { flutterResult.success("DISCONNECTED") }
             } catch (e: Exception) {
                 Log.e("Verifone", "Disconnect exception", e)
@@ -258,7 +328,6 @@ class MainActivity : FlutterActivity() {
             try {
                 val tm = transactionManager
                 if (tm == null) {
-                    Log.e("Verifone", "No TransactionManager — need to initialize first")
                     runOnUiThread {
                         flutterResult.error("NOT_CONNECTED",
                             "Terminal not connected. Call configureTerminal first.", null)
@@ -267,10 +336,7 @@ class MainActivity : FlutterActivity() {
                     return@launch
                 }
 
-                val paymentListener = createPaymentListener(flutterResult)
-                paymentSdk?.addListener(paymentListener)
-
-                // Open session if needed
+                // Open session if needed (matches reference app line 138-143)
                 if (!isSessionOpen) {
                     Log.d("Verifone", "Opening session...")
                     val txn = Transaction.create()
@@ -284,40 +350,47 @@ class MainActivity : FlutterActivity() {
                         runOnUiThread {
                             flutterResult.error("SESSION_FAILED", e.localizedMessage, null)
                         }
-                        paymentSdk?.removeListener(paymentListener)
                         pendingTransactionLock.set(false)
                         return@launch
                     }
                 }
 
-                // Build payment
+                // Build payment (matches reference app line 518-529)
                 val payment = Payment.create()
                 payment.transactionType = TransactionType.PAYMENT
                 payment.currency = currency
 
                 val amounts = AmountTotals.create(true)
-                val cents = Math.round(amount * 100.0)
-                amounts.total = Decimal(cents.toDouble() / 100.0)
+                try {
+                    amounts.total = Decimal.valueOf(java.math.BigDecimal(amount))
+                } catch (e: Exception) {
+                    Log.e("Verifone", "Decimal conversion failed", e)
+                    runOnUiThread {
+                        flutterResult.error("AMOUNT_ERROR", "Invalid amount: $amount", null)
+                    }
+                    pendingTransactionLock.set(false)
+                    return@launch
+                }
                 payment.requestedAmounts = amounts
 
                 Log.i("Verifone", "Starting payment: $amount $currency")
                 showToast("Processing: $amount $currency...")
+
+                // Create payment listener before starting payment
+                val paymentListener = createPaymentListener(flutterResult)
+                paymentSdk?.addListener(paymentListener)
 
                 val startStatus = tm.startPayment(payment)
                 if (startStatus.status != StatusCode.SUCCESS) {
                     val failMsg = startStatus.message ?: "Could not start payment"
                     Log.e("Verifone", "startPayment failed: $failMsg")
                     runOnUiThread {
-                        showToast("Payment Failed: $failMsg")
                         flutterResult.error("START_FAILED", failMsg, startStatus.status.toString())
                     }
                     paymentSdk?.removeListener(paymentListener)
                     endSessionQuietly()
                     pendingTransactionLock.set(false)
-                    return@launch
                 }
-
-                Log.d("Verifone", "startPayment sent, awaiting result...")
 
             } catch (e: Exception) {
                 Log.e("Verifone", "Transaction exception", e)
@@ -332,15 +405,6 @@ class MainActivity : FlutterActivity() {
     private fun createPaymentListener(flutterResult: MethodChannel.Result): CommerceListenerAdapter {
         return object : CommerceListenerAdapter() {
 
-            override fun handleTransactionEvent(event: TransactionEvent) {
-                try {
-                    Log.d("Verifone", "Transaction event: ${event.type}, status=${event.status}")
-                    // Track login/session state based on events
-                } catch (e: Exception) {
-                    Log.e("Verifone", "Error in transaction event handler", e)
-                }
-            }
-
             override fun handlePaymentCompletedEvent(event: PaymentCompletedEvent) {
                 try {
                     Log.d("Verifone", "PaymentCompleted: status=${event.status}")
@@ -351,8 +415,6 @@ class MainActivity : FlutterActivity() {
                     if (event.status == StatusCode.SUCCESS) {
                         val payment = event.payment
                         val authResult = payment?.authResult
-
-                        Log.i("Verifone", "Payment done. AuthResult: $authResult")
 
                         if (authResult == AuthorizationResult.AUTHORIZED) {
                             runOnUiThread {
@@ -396,7 +458,7 @@ class MainActivity : FlutterActivity() {
 
             override fun handleStatus(status: Status) {
                 try {
-                    Log.d("Verifone", "SDK Status: code=${status.status}, msg=${status.message}")
+                    Log.d("Verifone", "Payment Status: code=${status.status}, msg=${status.message}")
                 } catch (_: Exception) {}
             }
         }
@@ -409,7 +471,6 @@ class MainActivity : FlutterActivity() {
                 if (isSessionOpen) {
                     transactionManager?.endSession()
                     isSessionOpen = false
-                    Log.d("Verifone", "Session ended (quiet)")
                 }
             } catch (e: Exception) {
                 Log.e("Verifone", "End session error (quiet)", e)
