@@ -38,6 +38,7 @@ dependencies:
   cupertino_icons: ^1.0.8
   webview_flutter: ^4.14.0
   connectivity_plus: ^7.1.1
+  shared_preferences: ^2.3.0
   flutter_blue_plus: ^1.35.5
   esc_pos_utils_plus: ^2.0.4
 

@@ -80,17 +80,66 @@ class MainActivity : FlutterActivity() {
     // PSDK INITIALIZATION & CONNECTION
     // ================================================================
 
+    /**
+     * Discovers Verifone terminals on the local network using mDNS/Bonjour.
+     * Returns a list of discovered device IPs, or empty list if none found.
+     */
+    private suspend fun discoverDevices(timeoutMs: Long = 5000): List<String> {
+        val discoveredIps = mutableListOf<String>()
+        try {
+            val scanner = paymentSdk?.getDeviceScanner()
+            if (scanner == null) {
+                Log.w("Verifone", "DeviceScanner not available")
+                return discoveredIps
+            }
+
+            val paramMap: HashMap<String, String> = hashMapOf(
+                PsdkInitializationConstants.NETWORK_CONFIGURATION_KEY to
+                    PsdkInitializationConstants.NETWORK_CONFIGURATION_SERVICE_DISCOVERY_VALUE
+            )
+
+            val scanListener = object : DeviceScanListener {
+                override fun onDeviceFound(deviceInfo: PsdkDeviceInformation?) {
+                    deviceInfo?.let {
+                        val addr = it.address
+                        if (addr != null && addr.isNotBlank()) {
+                            Log.i("Verifone", "Discovered terminal: $addr (${it.serialNumber})")
+                            discoveredIps.add(addr)
+                        }
+                    }
+                }
+
+                override fun onScanComplete() {
+                    Log.i("Verifone", "Device scan complete. Found: ${discoveredIps.size} devices")
+                }
+
+                override fun onScanFailed(error: Status?) {
+                    Log.w("Verifone", "Device scan failed: ${error?.message}")
+                }
+            }
+
+            scanner.startScan(scanListener, paramMap)
+            delay(timeoutMs)
+            scanner.stopScan()
+
+        } catch (e: Exception) {
+            Log.e("Verifone", "Device discovery error", e)
+        }
+        return discoveredIps
+    }
+
     private fun configureAndInitializeTerminal(
         ip: String,
         port: String,
         flutterResult: MethodChannel.Result
     ) {
-        if (ip.isBlank()) {
-            flutterResult.error("INVALID_IP", "Terminal IP address is required", null)
-            return
+        // Allow empty IP — will try auto-discovery
+        if (ip.isNotBlank()) {
+            terminalIpAddress = ip.trim()
+            Log.i("Verifone", "Configuring terminal at $terminalIpAddress")
+        } else {
+            Log.i("Verifone", "No IP provided — will attempt auto-discovery")
         }
-        terminalIpAddress = ip.trim()
-        Log.i("Verifone", "Configuring terminal at $terminalIpAddress")
 
         psdkScope.launch {
             try {
@@ -104,6 +153,52 @@ class MainActivity : FlutterActivity() {
                 // Step 1: Create PaymentSdk
                 paymentSdk = PaymentSdk.create(this@MainActivity)
                 Log.d("Verifone", "PaymentSdk created")
+
+                // --- Auto-Discovery: if no IP provided, scan the network ---
+                if (terminalIpAddress.isBlank()) {
+                    runOnUiThread { showToast("Discovering terminals on network...") }
+                    val discovered = discoverDevices()
+                    when {
+                        discovered.size > 1 -> {
+                            // Multiple terminals found — return list for Flutter to show picker
+                            Log.i("Verifone", "Found ${discovered.size} terminals on network")
+                            val devicesList = org.json.JSONArray()
+                            discovered.forEach { ip ->
+                                devicesList.put(org.json.JSONObject().apply {
+                                    put("ipAddress", ip)
+                                })
+                            }
+                            flutterResult.success(
+                                buildJsonResponse("MULTIPLE_FOUND", null, null, null) {
+                                    put("devices", devicesList)
+                                    put("discoveredCount", discovered.size)
+                                    put("message", "Found ${discovered.size} terminals. Please select one.")
+                                }
+                            )
+                            return@launch
+                        }
+                        discovered.size == 1 -> {
+                            terminalIpAddress = discovered.first()
+                            Log.i("Verifone", "Auto-discovered terminal: $terminalIpAddress")
+                            runOnUiThread {
+                                showToast("Found terminal: $terminalIpAddress")
+                            }
+                        }
+                        else -> {
+                            Log.e("Verifone", "No terminals discovered on network")
+                            runOnUiThread {
+                                showToast("No terminal found. Please enter IP manually.")
+                            }
+                            flutterResult.success(
+                                buildJsonResponse("NOT_FOUND", null, null, null) {
+                                    put("message", "No Verifone terminal found on the network. Please provide the IP address manually.")
+                                    put("discoveredCount", 0)
+                                }
+                            )
+                            return@launch
+                        }
+                    }
+                }
 
                 // Step 2: Build connection params for TCP/IP client mode
                 val paramMap: HashMap<String, String> = hashMapOf(

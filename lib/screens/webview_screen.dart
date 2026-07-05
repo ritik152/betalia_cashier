@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import '../services/printer_service.dart';
 import '../services/usb_printer_service.dart';
@@ -28,6 +29,9 @@ class _WebViewScreenState extends State<WebViewScreen> {
   @override
   void initState() {
     super.initState();
+
+    // Load saved IP and auto-connect on startup
+    _loadSavedIpAndConnect();
 
     controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
@@ -101,19 +105,216 @@ class _WebViewScreenState extends State<WebViewScreen> {
     }
   }
 
+  /// Loads saved terminal IP from SharedPreferences and auto-connects.
+  Future<void> _loadSavedIpAndConnect() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedIp = prefs.getString('verifone_terminal_ip');
+      final savedPort = prefs.getString('verifone_terminal_port');
+
+      if (savedIp != null && savedIp.isNotEmpty) {
+        _terminalIpAddress = savedIp;
+        _terminalPort = savedPort ?? '';
+        debugPrint('Auto-connecting to saved terminal: $savedIp');
+
+        final String result = await platform.invokeMethod('configureTerminal', {
+          'ipAddress': savedIp,
+          'port': savedPort ?? '',
+        });
+
+        debugPrint('Auto-connect result: $result');
+        if (mounted && result == 'CONNECTED') {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Verifone connected: $savedIp'),
+              backgroundColor: Colors.green,
+              duration: const Duration(seconds: 2),
+            ),
+          );
+        }
+      } else {
+        debugPrint('No saved terminal IP — will try auto-discovery on first configure');
+      }
+    } catch (e) {
+      debugPrint('Error loading saved IP: $e');
+    }
+  }
+
+  /// Saves the terminal IP to SharedPreferences for future auto-connect.
+  Future<void> _saveTerminalIp(String ip, String port) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('verifone_terminal_ip', ip);
+      if (port.isNotEmpty) {
+        await prefs.setString('verifone_terminal_port', port);
+      }
+    } catch (e) {
+      debugPrint('Error saving terminal IP: $e');
+    }
+  }
+
+  /// Shows a picker dialog when multiple terminals are discovered.
+  Future<String?> _showTerminalPickerDialog(List<dynamic> devices) async {
+    final selectedIp = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Select Terminal'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('Found ${devices.length} Verifone terminals on the network:',
+                style: const TextStyle(fontSize: 13)),
+            const SizedBox(height: 12),
+            ...devices.map((device) {
+              final ip = device is Map ? device['ipAddress']?.toString() ?? '' : device.toString();
+              return ListTile(
+                leading: const Icon(Icons.credit_card, color: Colors.green),
+                title: Text('Terminal at $ip'),
+                subtitle: const Text('P630'),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                onTap: () => Navigator.pop(ctx, ip),
+              );
+            }),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Enter IP manually'),
+          ),
+        ],
+      ),
+    );
+    return selectedIp;
+  }
+
+  /// Shows a dialog for manual IP entry.
+  Future<void> _showManualIpDialog() async {
+    final ipController = TextEditingController(text: _terminalIpAddress);
+    final portController = TextEditingController(text: _terminalPort);
+
+    final result = await showDialog<Map<String, String>>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Configure Terminal'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('Enter the P630 terminal IP address:',
+                style: TextStyle(fontSize: 13)),
+            const SizedBox(height: 12),
+            TextField(
+              controller: ipController,
+              decoration: const InputDecoration(
+                labelText: 'IP Address',
+                hintText: '192.168.1.100',
+                border: OutlineInputBorder(),
+              ),
+              keyboardType: TextInputType.number,
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: portController,
+              decoration: const InputDecoration(
+                labelText: 'Port (optional)',
+                hintText: '16101',
+                border: OutlineInputBorder(),
+              ),
+              keyboardType: TextInputType.number,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.pop(ctx, {
+                'ip': ipController.text.trim(),
+                'port': portController.text.trim(),
+              });
+            },
+            child: const Text('Connect'),
+          ),
+        ],
+      ),
+    );
+
+    if (result != null && result['ip']!.isNotEmpty) {
+      final ip = result['ip']!;
+      final port = result['port'] ?? '';
+      _terminalIpAddress = ip;
+      _terminalPort = port;
+      await _saveTerminalIp(ip, port);
+      _configureTerminal({'ipAddress': ip, 'port': port});
+    }
+  }
+
   /// Configures the Verifone P630 terminal IP and initializes the connection.
   void _configureTerminal(Map<String, dynamic> data) async {
     final ip = (data['payload']?['ipAddress'] ?? data['ipAddress'] ?? '').toString();
     final port = (data['payload']?['port'] ?? data['port'] ?? '').toString();
 
+    // If no IP provided, try auto-discovery on the native side
     if (ip.isEmpty) {
-      debugPrint('CONFIGURE_TERMINAL: No IP address provided');
-      _sendToWebView('onTerminalStatus', {'status': 'ERROR', 'message': 'No IP address provided'});
+      debugPrint('CONFIGURE_TERMINAL: No IP provided — attempting auto-discovery');
+      try {
+        final String result = await platform.invokeMethod('configureTerminal', {
+          'ipAddress': '',
+          'port': '',
+        });
+
+        final parsed = jsonDecode(result);
+        if (parsed['status'] == 'MULTIPLE_FOUND') {
+          // Multiple terminals found — show picker dialog
+          final devices = parsed['devices'] as List<dynamic>? ?? [];
+          final selectedIp = await _showTerminalPickerDialog(devices);
+          if (selectedIp != null) {
+            // User selected a terminal — configure with that IP
+            _configureTerminal({'ipAddress': selectedIp, 'port': ''});
+          } else {
+            _sendToWebView('onTerminalStatus', parsed);
+          }
+          return;
+        }
+        if (parsed['status'] == 'NOT_FOUND') {
+          // No terminal found — show manual IP dialog
+          _sendToWebView('onTerminalStatus', parsed);
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(parsed['message'] ?? 'No terminal found'),
+                backgroundColor: Colors.red,
+                action: SnackBarAction(
+                  label: 'Enter IP',
+                  textColor: Colors.white,
+                  onPressed: _showManualIpDialog,
+                ),
+                duration: const Duration(seconds: 8),
+              ),
+            );
+          }
+          return;
+        }
+        // If discovered or connected, save the IP
+        if (parsed['ipAddress'] != null) {
+          _terminalIpAddress = parsed['ipAddress'];
+          await _saveTerminalIp(_terminalIpAddress, _terminalPort);
+        }
+        _sendToWebView('onTerminalStatus', parsed);
+      } on PlatformException catch (e) {
+        _sendToWebView('onTerminalStatus', {'status': 'ERROR', 'message': e.message});
+      }
       return;
     }
 
     _terminalIpAddress = ip;
     _terminalPort = port;
+    await _saveTerminalIp(ip, port);
 
     try {
       final String result = await platform.invokeMethod('configureTerminal', {
