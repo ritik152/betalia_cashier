@@ -62,6 +62,9 @@ class _WebViewScreenState extends State<WebViewScreen> {
               case 'END_SESSION':
                 _endSession();
                 break;
+              case 'SHOW_CONFIG':
+                _showManualIpDialog();
+                break;
               case 'DISCONNECT':
                 _disconnectTerminal();
                 break;
@@ -133,7 +136,10 @@ class _WebViewScreenState extends State<WebViewScreen> {
           );
         }
       } else {
-        debugPrint('No saved terminal IP — will try auto-discovery on first configure');
+        // No saved IP — show the IP config dialog after a brief delay
+        debugPrint('No saved terminal IP — showing configuration dialog');
+        await Future.delayed(const Duration(seconds: 2));
+        if (mounted) _showManualIpDialog();
       }
     } catch (e) {
       debugPrint('Error loading saved IP: $e');
