@@ -413,9 +413,9 @@ class _WebViewScreenState extends State<WebViewScreen> {
     try {
       final safeJson = jsonEncode(data);
       // Escape for safe injection into JS string
-      final escaped = safeJson.replaceAll('\\', '\\\\').replaceAll("'", "\\'");
+      final escaped = safeJson.replaceAll('\\', '\\\\').replaceAll("'", "\\'").replaceAll('\n', '\\n');
       controller.runJavaScript(
-        "try { if(window.$functionName) window.$functionName($escaped); } catch(e) { console.error('$functionName callback error:', e); }",
+        "try { if(window.$functionName) window.$functionName('$escaped'); } catch(e) { console.error('$functionName callback error:', e); }",
       );
     } catch (e) {
       debugPrint('Error calling $functionName in WebView: $e');
