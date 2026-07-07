@@ -85,7 +85,7 @@ class _WebViewScreenState extends State<WebViewScreen> {
             // Inject terminal config if available
             _injectTerminalConfig();
             // Inject Test Payment Button
-            _injectTestPaymentButton();
+            // _injectTestPaymentButton();
           },
         ),
       )
@@ -185,13 +185,13 @@ class _WebViewScreenState extends State<WebViewScreen> {
       debugPrint('Error connecting to terminal: $e');
       _updateTestButtonState(false, e.toString());
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Connection error: $e'),
-            backgroundColor: Colors.red,
-            duration: const Duration(seconds: 4),
-          ),
-        );
+        // ScaffoldMessenger.of(context).showSnackBar(
+        //   SnackBar(
+        //     content: Text('Connection error: $e'),
+        //     backgroundColor: Colors.red,
+        //     duration: const Duration(seconds: 4),
+        //   ),
+        // );
       }
     }
   }

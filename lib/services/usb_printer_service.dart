@@ -59,25 +59,22 @@ class UsbPrinterService extends ChangeNotifier {
     notifyListeners();
   }
 
-  /*Future<void> printBill(Map<String, dynamic> data) async {
+  Future<bool> printBill(Map<String, dynamic> data) async {
     if (!_isConnected) {
       debugPrint("No USB printer connected");
-      return;
+      return false;
     }
 
-    // Extract root structures safely matching the complex map payload
     final Map<String, dynamic> order = data['order'] as Map<String, dynamic>? ?? {};
     final Map<String, dynamic> vendor = data['vendor'] as Map<String, dynamic>? ?? {};
 
-    // If payload structure is entirely missing or empty, do nothing or handle gracefully
     if (order.isEmpty && vendor.isEmpty) {
       debugPrint("Receipt dataset payload is completely empty.");
-      return;
+      return false;
     }
 
     try {
       final profile = await CapabilityProfile.load();
-      // Use PaperSize.mm80 as shown by the wide layout in "Screenshot 2026-07-04 at 8.05.21 PM.png"
       final generator = Generator(PaperSize.mm80, profile);
       List<int> bytes = [];
 
@@ -119,11 +116,11 @@ class UsbPrinterService extends ChangeNotifier {
       // ==========================================
       bytes += generator.row([
         PosColumn(text: 'Order Type:', width: 6),
-        PosColumn(text: '${order['orderType'] ?? ''}', width: 6, styles: const PosStyles(align: PosAlign.right, bold: true)),
+        PosColumn(text: '${order['orderType'] ?? ''}'.toUpperCase(), width: 6, styles: const PosStyles(align: PosAlign.right, bold: true)),
       ]);
       bytes += generator.row([
         PosColumn(text: 'Payment:', width: 6),
-        PosColumn(text: '${order['paymentMethod'] ?? ''}', width: 6, styles: const PosStyles(align: PosAlign.right, bold: true)),
+        PosColumn(text: '${order['paymentMethod'] ?? ''}'.toUpperCase(), width: 6, styles: const PosStyles(align: PosAlign.right, bold: true)),
       ]);
       bytes += generator.row([
         PosColumn(text: 'Cashier :', width: 6),
@@ -134,7 +131,6 @@ class UsbPrinterService extends ChangeNotifier {
         PosColumn(text: '${order['deviceId'] ?? ''}', width: 6, styles: const PosStyles(align: PosAlign.right, bold: true)),
       ]);
 
-      // Dynamic item count reduce calculation matching template logic
       final List itemsList = order['items'] as List? ?? [];
       int totalItemCount = itemsList.fold<int>(0, (sum, item) {
         return sum + ((item['quantity'] as num?)?.toInt() ?? 0);
@@ -162,34 +158,22 @@ class UsbPrinterService extends ChangeNotifier {
       for (var itemDynamic in itemsList) {
         final Map<String, dynamic> item = itemDynamic as Map<String, dynamic>;
 
-        // Compute dynamic single item base price based on rules
-        double price = 0.0;
-        if (item['discountPrice'] != null && (item['discountPrice'] as num) > 0) {
-          price = (item['discountPrice'] as num).toDouble();
-        } else {
-          price = (item['price'] as num? ?? 0.0).toDouble();
-        }
-        if (order['orderType'] == 'dine') {
-          price = (price / 1.15) * 1.25;
-        }
-
+        double price = (item['price'] as num? ?? 0.0).toDouble();
         final int qty = (item['quantity'] as num? ?? 1).toInt();
         final double computedTotalPrice = price * qty;
 
-        // Resolve safe product display name string
         String itemName = '';
-        if (item['menuItemId'] is Map) {
-          itemName = item['menuItemId']['name']?.toString() ?? '';
+        if (item['menuItemId'] != null && item['menuItemId'] is Map) {
+          final Map<dynamic, dynamic> menuItemField = item['menuItemId'] as Map;
+          itemName = menuItemField['name']?.toString() ?? '';
         }
 
-        // Root item row
         bytes += generator.row([
           PosColumn(text: itemName, width: 7),
           PosColumn(text: '$qty', width: 2, styles: const PosStyles(align: PosAlign.center)),
           PosColumn(text: computedTotalPrice.toStringAsFixed(2), width: 3, styles: const PosStyles(align: PosAlign.right)),
         ]);
 
-        // Print nested Options if SubItems are absent
         final List? selectedOptions = item['selectedOptions'] as List?;
         final List? subItems = item['subItems'] as List?;
 
@@ -201,7 +185,6 @@ class UsbPrinterService extends ChangeNotifier {
           }
         }
 
-        // Print structured SubItems matching image layout rules
         if (subItems != null && subItems.isNotEmpty) {
           for (var subDynamic in subItems) {
             final Map<String, dynamic> sub = subDynamic as Map<String, dynamic>;
@@ -210,7 +193,6 @@ class UsbPrinterService extends ChangeNotifier {
 
             bytes += generator.text('  $subPrefix${sub['name'] ?? ''}', styles: const PosStyles(align: PosAlign.left));
 
-            // Nested Subitem options formatting
             final List? subOpts = sub['selectedOptions'] as List?;
             if (subOpts != null && subOpts.isNotEmpty) {
               for (var subOg in subOpts) {
@@ -226,7 +208,7 @@ class UsbPrinterService extends ChangeNotifier {
       bytes += generator.hr();
 
       // ==========================================
-      // 6. GRAND TOTAL ROW (Large text display)
+      // 6. GRAND TOTAL ROW
       // ==========================================
       final double totalPrice = (order['totalPrice'] as num? ?? 0.0).toDouble();
       bytes += generator.row([
@@ -237,7 +219,7 @@ class UsbPrinterService extends ChangeNotifier {
       bytes += generator.hr();
 
       // ==========================================
-      // 7. TAXES & ACCUMULATIVE DISCOUNTS SUMMARY
+      // 7. TAXES SUMMARY
       // ==========================================
       final double subtotalPrice = (order['subtotalPrice'] as num? ?? 0.0).toDouble();
       bytes += generator.row([
@@ -245,7 +227,6 @@ class UsbPrinterService extends ChangeNotifier {
         PosColumn(text: 'kr ${subtotalPrice.toStringAsFixed(2)}', width: 6, styles: const PosStyles(align: PosAlign.right)),
       ]);
 
-      // Handle conditional tax processing
       final double vatPrice = (order['vatPrice'] as num? ?? 0.0).toDouble();
       if (vatPrice > 0) {
         final Map<String, double> vatRates = {'takeaway': 0.15, 'dine': 0.25, 'delivery': 0.15};
@@ -268,19 +249,16 @@ class UsbPrinterService extends ChangeNotifier {
       bytes += generator.text(receiptMessage, styles: const PosStyles(align: PosAlign.center, bold: true));
       bytes += generator.text(vendorName, styles: const PosStyles(align: PosAlign.center));
 
-      // Formatting date string display dynamically
       final String createdAtStr = order['createdAt']?.toString() ?? DateTime.now().toIso8601String();
       try {
         final DateTime dt = DateTime.parse(createdAtStr);
-        // Converts ISO string to: "04 Jul 2026, 14:27" layout directly matching the image
         final List<String> months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-        final String formattedDate = "${dt.day.toString().padLeft(2, '0')} ${months[dt.month - 1]} ${dt.year}, ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}";
+        final String formattedDate = "${dt.day.toString().padLeft(2, '0')} ${months[dt.month - 1]} ${dt.year} at ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}";
         bytes += generator.text(formattedDate, styles: const PosStyles(align: PosAlign.center));
       } catch (_) {
         bytes += generator.text(createdAtStr, styles: const PosStyles(align: PosAlign.center));
       }
 
-      // Print trailing website link line if explicitly initialized
       if (vendor['website'] != null && vendor['website'].toString().trim().isNotEmpty) {
         bytes += generator.text(vendor['website'].toString(), styles: const PosStyles(align: PosAlign.center));
       }
@@ -288,25 +266,28 @@ class UsbPrinterService extends ChangeNotifier {
       bytes += generator.feed(3);
       bytes += generator.cut();
 
-      // Output raw structural byte buffers directly down to the serial device channel stream
       try {
         await _usbPrinter.write(Uint8List.fromList(bytes));
       } catch (e) {
         debugPrint("UsbPrinterService: USB write failed: $e");
-        // Re-throw to be caught by outer catch
-        rethrow;
+        return false;
       }
+
       await Future.delayed(const Duration(milliseconds: 500));
+
+      return true; // Successfully printed
 
     } on PlatformException catch (e) {
       debugPrint("Platform Error writing to USB printer: ${e.message}");
+      return false;
     } catch (e) {
       debugPrint("Error printing USB bill: $e");
+      return false;
     }
-  }*/
+  }
   /// Prints a receipt to the connected USB thermal printer.
   /// Returns true if the print was sent successfully, false otherwise.
-  Future<bool> printBill(Map<String, dynamic> data) async {
+  /*Future<bool> printBill(Map<String, dynamic> data) async {
     if (!_isConnected) {
       debugPrint("UsbPrinterService: No USB printer connected");
       return false;
@@ -373,5 +354,5 @@ class UsbPrinterService extends ChangeNotifier {
       debugPrint("UsbPrinterService: Error printing USB bill: $e");
       return false;
     }
-  }
+  }*/
 }
