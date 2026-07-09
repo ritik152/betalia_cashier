@@ -65,63 +65,12 @@ class _WebViewScreenState extends State<WebViewScreen> {
             setState(() {
               isLoading = false;
             });
-            // Inject terminal config if available
-            _injectTerminalConfig();
-            // Inject Test Payment Button
-            // _injectTestPaymentButton();
           },
         ),
       )
       ..loadRequest(
-        Uri.parse('https://betalia.no/bakeri/cashier/login'),
+        Uri.parse('http://10.0.2.2:3000/bakeri/cashier/login'),
       );
-  }
-
-  // ================================================================
-  // TERMINAL CONFIGURATION
-  // ================================================================
-
-  /// Injects a floating "TEST PAY 5 NOK" button for standalone payment testing.
-  void _injectTestPaymentButton() {
-    final js = '''
-(function() {
-  if (document.getElementById('__verifone_test_btn')) return;
-  var btn = document.createElement('button');
-  btn.id = '__verifone_test_btn';
-  btn.innerText = 'TEST PAY 5 NOK';
-  btn.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:99999;' +
-    'padding:14px 24px;background:#4CAF50;color:white;border:none;' +
-    'border-radius:12px;font-size:16px;font-weight:bold;' +
-    'box-shadow:0 4px 12px rgba(0,0,0,0.3);cursor:pointer;';
-  btn.onclick = function() {
-    try {
-      NativeBridge.postMessage(JSON.stringify({
-        type: 'PAYMENT',
-        payload: { amount: 5, currency: 'NOK' }
-      }));
-      btn.innerText = 'PROCESSING...';
-      btn.style.background = '#FF9800';
-      setTimeout(function() { btn.innerText = 'TEST PAY 5 NOK'; btn.style.background = '#4CAF50'; }, 5000);
-    } catch(e) {
-      alert('Error: ' + e.message);
-    }
-  };
-  document.body.appendChild(btn);
-})();
-''';
-    controller.runJavaScript(js);
-  }
-
-  /// Injects stored terminal IP config into the WebView so the frontend
-  /// knows where to connect.
-  void _injectTerminalConfig() {
-    if (_terminalIpAddress.isNotEmpty) {
-      controller.runJavaScript(
-        'if(window.onTerminalConfig) window.onTerminalConfig('
-        '${jsonEncode({"ipAddress": _terminalIpAddress, "port": _terminalPort})}'
-        ')',
-      );
-    }
   }
 
 
@@ -357,43 +306,6 @@ class _WebViewScreenState extends State<WebViewScreen> {
           ),
         );
       }
-    }
-  }
-
-  void _showPrinterSettings() {
-    if (_printerService.isConnected || _usbPrinterService.isConnected) {
-      final name = _printerService.isConnected
-          ? _printerService.connectedDeviceName
-          : _usbPrinterService.connectedDeviceName;
-      final type = _printerService.isConnected ? "Bluetooth" : "USB";
-
-      showDialog(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('Printer Connected'),
-          content: Text('Connected to: $name ($type)'),
-          actions: [
-            TextButton(
-              onPressed: () {
-                _printerService.disconnect();
-                _usbPrinterService.disconnect();
-                Navigator.pop(context);
-              },
-              style: TextButton.styleFrom(foregroundColor: Colors.red),
-              child: const Text('Disconnect'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Close'),
-            ),
-          ],
-        ),
-      );
-    } else {
-      showDialog(
-        context: context,
-        builder: (context) => const PrinterSelectionDialog(),
-      );
     }
   }
 
