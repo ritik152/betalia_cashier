@@ -69,7 +69,7 @@ class _WebViewScreenState extends State<WebViewScreen> {
         ),
       )
       ..loadRequest(
-        Uri.parse('http://10.0.2.2:3000/bakeri/cashier/login'),
+        Uri.parse('https://betalia.no/bakeri/cashier/login'),
       );
   }
 
