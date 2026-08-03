@@ -7,7 +7,24 @@
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN"/>
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
 
-    <uses-feature android:name="android.hardware.usb.host" />
+    <!-- USB Host support for receipt printer -->
+    <!-- If you know the exact vendor-id and product-id (decimal) of your
+         printer, add a device filter on the MainActivity so Android can
+         auto-launch the permission dialog.  Replace the placeholder IDs
+         below with your real decimal values.
+
+         Example:
+         <meta-data android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                    android:resource="@xml/device_filter" />
+
+         Then create res/xml/device_filter.xml with:
+         <resources>
+           <usb-device vendor-id="1234" product-id="5678" />
+         </resources>
+    -->
+    <uses-feature
+        android:name="android.hardware.usb.host"
+        android:required="true" />
 
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>

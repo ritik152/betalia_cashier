@@ -3,9 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
-import '../services/printer_service.dart';
 import '../services/usb_printer_service.dart';
-import '../widgets/printer_selection_dialog.dart';
 
 class WebViewScreen extends StatefulWidget {
   const WebViewScreen({super.key});
@@ -17,7 +15,6 @@ class WebViewScreen extends StatefulWidget {
 class _WebViewScreenState extends State<WebViewScreen> {
   static const platform = MethodChannel('com.betalia.payments/p630');
   late final WebViewController controller;
-  final PrinterService _printerService = PrinterService();
   final UsbPrinterService _usbPrinterService = UsbPrinterService();
 
   bool isLoading = true;
@@ -30,7 +27,11 @@ class _WebViewScreenState extends State<WebViewScreen> {
   void initState() {
     super.initState();
 
-    // Load saved IP and auto-connect on startup
+    // Attempt USB printer connection after the first frame.
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await _usbPrinterService.ensureConnected();
+    });
+
     controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..addJavaScriptChannel(
@@ -39,20 +40,31 @@ class _WebViewScreenState extends State<WebViewScreen> {
           try {
             final data = jsonDecode(message.message);
 
-            print("NativeBridge DATA ============ $data");
-
             switch (data['type']) {
+              case 'CHECK_TERMINAL_STATUS':
+                _checkTerminalStatus();
+                break;
+
               case 'CONFIGURE_TERMINAL':
                 _configureTerminal(data);
                 break;
+
+              case 'CHANGE_TERMINAL':
+                _changeTerminal();
+                break;
+
               case 'PAYMENT':
                 _startPayment(data);
                 break;
+
               case 'PRINT':
                 _printBill(data);
                 break;
+
               default:
-                debugPrint('Unknown NativeBridge action: ${data['type']}');
+                debugPrint(
+                  'Unknown NativeBridge action: ${data['type']}',
+                );
             }
           } catch (e) {
             debugPrint('Invalid JSON from NativeBridge: $e');
@@ -61,41 +73,166 @@ class _WebViewScreenState extends State<WebViewScreen> {
       )
       ..setNavigationDelegate(
         NavigationDelegate(
-          onPageFinished: (_) {
-            setState(() {
-              isLoading = false;
-            });
+          onPageFinished: (_) async {
+            if (mounted) {
+              setState(() {
+                isLoading = false;
+              });
+            }
+
+            await _autoConnectTerminal();
           },
         ),
       )
       ..loadRequest(
-        Uri.parse('https://betalia.no/bakeri/cashier/login'),
+        Uri.parse('http://10.0.2.2:3000/bakeri/cashier'),
       );
   }
 
+  // ================================================================
+  // TERMINAL STATUS & CONFIGURATION (Verifone P630)
+  // ================================================================
 
+  /// Queries the native side for the current terminal status and forwards
+  /// it to the web page via `onTerminalStatus`.
+  Future<void> _checkTerminalStatus() async {
+    try {
+      final String statusJson =
+          await platform.invokeMethod('checkTerminalStatus');
 
-  /// Configures the Verifone P630 terminal IP and initializes the connection.
-  void _configureTerminal(Map<String, dynamic> data) async {
-    final ip = (data['payload']?['ipAddress'] ?? data['ipAddress'] ?? '').toString();
-    // final port = (data['payload']?['port'] ?? data['port'] ?? '').toString();
+      final Map<String, dynamic> status =
+          jsonDecode(statusJson);
 
-    // If no IP provided, try auto-discovery on the native side
+      debugPrint('Terminal status: $status');
 
-    _terminalIpAddress = ip;
-    // _terminalPort = port;
+      _sendToWebView('onTerminalStatus', status);
+    } on PlatformException catch (e) {
+      debugPrint(
+        'Terminal status error: ${e.code} - ${e.message}',
+      );
+
+      _sendToWebView('onTerminalStatus', {
+        'status': 'ERROR',
+        'code': e.code,
+        'message': e.message,
+      });
+    } catch (e) {
+      debugPrint('Terminal status error: $e');
+
+      _sendToWebView('onTerminalStatus', {
+        'status': 'ERROR',
+        'message': e.toString(),
+      });
+    }
+  }
+
+  /// Configures the Verifone P630 terminal and initializes the connection.
+  ///
+  /// Requires the IP address, serial number, instance ID and POS device ID.
+  /// On success, the terminal details are persisted so the app can
+  /// auto-reconnect on the next launch.
+  Future<String?> _configureTerminal(
+    Map<String, dynamic> data,
+  ) async {
+    final payload =
+        data['payload'] as Map<String, dynamic>? ?? data;
+
+    final ipAddress =
+        (payload['ipAddress'] ?? '').toString().trim();
+
+    final serialNumber =
+        (payload['serialNumber'] ?? '').toString().trim();
+
+    final instanceId =
+        (payload['instanceId'] ?? '').toString().trim();
+
+    final posDeviceId =
+        (payload['posDeviceId'] ?? '').toString().trim();
+
+    if (ipAddress.isEmpty ||
+        serialNumber.isEmpty ||
+        instanceId.isEmpty ||
+        posDeviceId.isEmpty) {
+      _sendToWebView('onTerminalStatus', {
+        'status': 'INVALID_CONFIGURATION',
+        'message': 'All terminal fields are required',
+      });
+      return null;
+    }
+
+    // Validate IPv4 format before passing to native (prevents native crash)
+    final ipv4RegExp = RegExp(
+      r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$',
+    );
+    if (!ipv4RegExp.hasMatch(ipAddress)) {
+      _sendToWebView('onTerminalStatus', {
+        'status': 'INVALID_CONFIGURATION',
+        'message': 'Invalid IP address. Please enter a valid IPv4 address (e.g., 192.168.1.100).',
+      });
+      return null;
+    }
+
+    _terminalIpAddress = ipAddress;
 
     try {
-      final String result = await platform.invokeMethod('configureTerminal', {
-        'ipAddress': ip,
-        // 'port': port,
-      });
+      final String result =
+          await platform.invokeMethod(
+        'configureTerminal',
+        {
+          'ipAddress': ipAddress,
+          'serialNumber': serialNumber,
+          'instanceId': instanceId,
+          'posDeviceId': posDeviceId,
+        },
+      ).timeout(
+        const Duration(seconds: 45),
+        onTimeout: () {
+          _sendToWebView('onTerminalStatus', {
+            'status': 'TIMEOUT',
+            'code': 'CONNECT_TIMEOUT',
+            'message': 'Terminal connection timed out. Check the IP address and ensure the terminal is reachable.',
+          });
+          return 'TIMEOUT';
+        },
+      );
+
+      if (result == 'TIMEOUT') {
+        debugPrint('Terminal configuration timed out');
+        return 'TIMEOUT';
+      }
 
       debugPrint('Terminal configured: $result');
 
+      if (result == 'CONNECTED') {
+        final preferences =
+            await SharedPreferences.getInstance();
+
+        await preferences.setString(
+          'terminalIpAddress',
+          ipAddress,
+        );
+
+        await preferences.setString(
+          'terminalSerialNumber',
+          serialNumber,
+        );
+
+        await preferences.setString(
+          'terminalInstanceId',
+          instanceId,
+        );
+
+        await preferences.setString(
+          'terminalPosDeviceId',
+          posDeviceId,
+        );
+      }
+
       _sendToWebView('onTerminalStatus', {
         'status': result,
-        'ipAddress': ip,
+        'ipAddress': ipAddress,
+        'serialNumber': serialNumber,
+        'instanceId': instanceId,
       });
 
       if (mounted) {
@@ -106,10 +243,13 @@ class _WebViewScreenState extends State<WebViewScreen> {
           ),
         );
       }
+
+      return result;
     } on PlatformException catch (e) {
       debugPrint('Terminal configure error: ${e.message}');
       _sendToWebView('onTerminalStatus', {
         'status': 'ERROR',
+        'code': e.code,
         'message': e.message,
       });
 
@@ -121,6 +261,98 @@ class _WebViewScreenState extends State<WebViewScreen> {
           ),
         );
       }
+
+      return null;
+    }
+  }
+
+  /// Reads the saved terminal configuration and reconnects automatically.
+  ///
+  /// Called after the web page finishes loading so that the
+  /// `onTerminalStatus` JavaScript handler is ready to receive the response.
+  Future<void> _autoConnectTerminal() async {
+    final preferences =
+        await SharedPreferences.getInstance();
+
+    final ipAddress =
+        preferences.getString('terminalIpAddress') ?? '';
+
+    final serialNumber =
+        preferences.getString('terminalSerialNumber') ?? '';
+
+    final instanceId =
+        preferences.getString('terminalInstanceId') ?? '';
+
+    final posDeviceId =
+        preferences.getString('terminalPosDeviceId') ?? '';
+
+    if (ipAddress.isEmpty ||
+        serialNumber.isEmpty ||
+        instanceId.isEmpty ||
+        posDeviceId.isEmpty) {
+      _sendToWebView('onTerminalStatus', {
+        'status': 'NOT_CONFIGURED',
+      });
+      return;
+    }
+
+    _sendToWebView('onTerminalStatus', {
+      'status': 'CONNECTING',
+    });
+
+    final String? result = await _configureTerminal({
+      'payload': {
+        'ipAddress': ipAddress,
+        'serialNumber': serialNumber,
+        'instanceId': instanceId,
+        'posDeviceId': posDeviceId,
+      }
+    });
+
+    if (result != 'CONNECTED') {
+      final preferences =
+          await SharedPreferences.getInstance();
+
+      await preferences.remove('terminalIpAddress');
+      await preferences.remove('terminalSerialNumber');
+      await preferences.remove('terminalInstanceId');
+      await preferences.remove('terminalPosDeviceId');
+
+      _terminalIpAddress = '';
+
+      _sendToWebView('onTerminalStatus', {
+        'status': 'NOT_CONFIGURED',
+      });
+    }
+  }
+
+  /// Forgets the saved terminal, removes its persisted configuration,
+  /// and tells the web page to show the setup popup again.
+  Future<void> _changeTerminal() async {
+    try {
+      final String result =
+          await platform.invokeMethod('forgetTerminal');
+
+      final preferences =
+          await SharedPreferences.getInstance();
+
+      await preferences.remove('terminalIpAddress');
+      await preferences.remove('terminalSerialNumber');
+      await preferences.remove('terminalInstanceId');
+      await preferences.remove('terminalPosDeviceId');
+
+      _terminalIpAddress = '';
+
+      _sendToWebView('onTerminalStatus', {
+        'status': 'NOT_CONFIGURED',
+        'result': result,
+      });
+    } on PlatformException catch (e) {
+      _sendToWebView('onTerminalStatus', {
+        'status': 'ERROR',
+        'code': e.code,
+        'message': e.message,
+      });
     }
   }
 
@@ -222,44 +454,38 @@ class _WebViewScreenState extends State<WebViewScreen> {
     }
   }
 
-
-
-
   // ================================================================
-  // PRINTER LOGIC
+  // PRINTER LOGIC (USB only)
   // ================================================================
-
 
   void _printBill(Map<String, dynamic> data) async {
     try {
-      if (!_printerService.isConnected && !_usbPrinterService.isConnected) {
-        bool? connected = await showDialog<bool>(
-          context: context,
-          builder: (context) => const PrinterSelectionDialog(),
-        );
-        if (connected != true) {
-          _sendToWebView('onPrintResult', {
-            'success': false,
-            'error': 'No printer selected',
-          });
-          return;
-        }
-      }
+      // Extract the actual receipt data from the NativeBridge message wrapper.
+      // The frontend sends: { type: "PRINT", payload: { order: {...}, vendor: {...} } }
+      final Map<String, dynamic> receiptData =
+          data['payload'] as Map<String, dynamic>? ?? data;
 
-      bool success = false;
-      if (_printerService.isConnected) {
-        success = await _printerService.printBill(data);
-      } else if (_usbPrinterService.isConnected) {
-        success = await _usbPrinterService.printBill(data);
-      } else {
+      // Determine whether the cash drawer should be opened.
+      final Map<String, dynamic> order =
+          receiptData['order'] as Map<String, dynamic>? ?? {};
+      final bool isCopy = order['isCopy'] == true;
+      final String paymentMethod =
+          order['paymentMethod']?.toString().trim().toLowerCase() ?? '';
+      final bool shouldOpenDrawer =
+          !isCopy && (paymentMethod == 'cash' || paymentMethod == 'kontant');
+
+      // Ensure USB printer is connected (auto-reconnect if needed).
+      final bool usbReady = await _usbPrinterService.ensureConnected();
+
+      if (!usbReady) {
         _sendToWebView('onPrintResult', {
           'success': false,
-          'error': 'Printer disconnected',
+          'error': 'USB printer not connected or not found',
         });
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text('No printer connected'),
+              content: Text('USB printer not connected or not found'),
               backgroundColor: Colors.red,
             ),
           );
@@ -267,8 +493,17 @@ class _WebViewScreenState extends State<WebViewScreen> {
         return;
       }
 
+      // Send receipt and optional drawer command to the USB printer.
+      final bool success = await _usbPrinterService.printBill(
+        receiptData,
+        openDrawer: shouldOpenDrawer,
+      );
+
       if (success) {
-        _sendToWebView('onPrintResult', {'success': true});
+        _sendToWebView('onPrintResult', {
+          'success': true,
+          'drawerCommandSent': shouldOpenDrawer,
+        });
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
