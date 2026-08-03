@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import 'package:webview_flutter_android/webview_flutter_android.dart';
 import '../services/usb_printer_service.dart';
 
 class WebViewScreen extends StatefulWidget {
@@ -87,6 +88,19 @@ class _WebViewScreenState extends State<WebViewScreen> {
       ..loadRequest(
         Uri.parse('http://10.0.2.2:3000/bakeri/cashier'),
       );
+
+    // Configure Android WebView for sharp rendering on tablet screens.
+    // The webview_flutter_android plugin defaults useWideViewPort to false,
+    // which causes the page to render at a fixed ~980px width and then
+    // upscale — producing blurry text and UI elements on high-DPI tablets.
+    // Enabling it respects the <meta viewport> tag so the page renders at
+    // the native device pixel width with no scaling.
+    if (controller.platform is AndroidWebViewController) {
+      final androidController =
+          controller.platform as AndroidWebViewController;
+      androidController.setUseWideViewPort(true);
+      androidController.setTextZoom(100);
+    }
   }
 
   // ================================================================
