@@ -1,81 +1,228 @@
+import 'dart:async';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
-import 'package:flutter_usb_printer/flutter_usb_printer.dart';
 import 'package:esc_pos_utils_plus/esc_pos_utils_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-class UsbPrinterService extends ChangeNotifier {
-  static final UsbPrinterService _instance = UsbPrinterService._internal();
-  factory UsbPrinterService() => _instance;
-  UsbPrinterService._internal();
-
-  final FlutterUsbPrinter _usbPrinter = FlutterUsbPrinter();
+class EthernetPrinterService extends ChangeNotifier {
+  static final EthernetPrinterService _instance =
+      EthernetPrinterService._internal();
+  factory EthernetPrinterService() => _instance;
+  EthernetPrinterService._internal();
 
   bool _isConnected = false;
   bool _isConnecting = false;
+  Socket? _socket;
   Map<String, dynamic>? _connectedDevice;
 
   bool get isConnected => _isConnected;
   bool get isConnecting => _isConnecting;
   String? get connectedDeviceName =>
-      _connectedDevice?['productName'] ?? _connectedDevice?['deviceName'];
+      _connectedDevice?['name'] ?? _connectedDevice?['ip'];
 
-  // SharedPreferences keys for persisted USB printer identity
-  static const String _prefVendorIdKey = 'usb_printer_vendor_id';
-  static const String _prefProductIdKey = 'usb_printer_product_id';
+  // SharedPreferences keys
+  static const String _prefLastIpKey = 'ethernet_printer_last_ip';
+  static const String _prefPrinterNamesKey = 'ethernet_printer_names';
 
   /// USB chunk size for print writes (4 KB).
+  static const int _tcpChunkSize = 4096;
+
+  // ---------------------------------------------------------------------------
+  // Network scan for port 9100 devices
+  // ---------------------------------------------------------------------------
+
+  /// Scans the local subnet for devices with port 9100 open.
   ///
-  /// USB thermal printers have finite hardware buffers (typically 4–64 KB).
-  /// Sending the entire receipt in one monolithic bulk transfer can exceed
-  /// the buffer when printing combo deals or orders with many items.
-  static const int _usbChunkSize = 4096;
+  /// Returns a list of [Map]s with keys:
+  ///   - `ip` (String): the IP address
+  ///   - `port` (int): always 9100
+  ///   - `name` (String?): user-assigned name if saved, null otherwise
+  Future<List<Map<String, dynamic>>> scanNetwork() async {
+    // Load previously saved names.
+    final Map<String, String> savedNames = await _loadPrinterNames();
 
-  // ---------------------------------------------------------------------------
-  // Device discovery
-  // ---------------------------------------------------------------------------
-
-  Future<List<Map<String, dynamic>>> getUsbDevices() async {
-    try {
-      final List<Map<String, dynamic>> results = await FlutterUsbPrinter.getUSBDeviceList();
-      debugPrint('UsbPrinterService: USB devices found: ${results.length}');
-      return results;
-    } catch (e) {
-      debugPrint('UsbPrinterService: Error getting USB devices: $e');
+    // Determine the local subnet prefix.
+    final String? subnetPrefix = await _getLocalSubnetPrefix();
+    if (subnetPrefix == null) {
+      debugPrint('EthernetPrinterService: could not determine local subnet');
       return [];
     }
+
+    final List<Map<String, dynamic>> found = [];
+    const int port = 9100;
+    const int timeoutMs = 500;
+
+    // Probe all 254 addresses concurrently in batches of 50.
+    final List<Future<void>> futures = [];
+    for (int host = 1; host <= 254; host++) {
+      final String ip = '$subnetPrefix.$host';
+      futures.add(
+        _probeHost(ip, port, timeoutMs).then((reachable) {
+          if (reachable) {
+            found.add({
+              'ip': ip,
+              'port': port,
+              'name': savedNames[ip],
+            });
+          }
+        }),
+      );
+      // Batch every 50 to avoid overwhelming the network stack.
+      if (futures.length >= 50) {
+        await Future.wait(futures);
+        futures.clear();
+      }
+    }
+    if (futures.isNotEmpty) {
+      await Future.wait(futures);
+    }
+
+    // Sort by IP (last octet ascending).
+    found.sort((a, b) {
+      final aIp = a['ip'] as String;
+      final bIp = b['ip'] as String;
+      final int aLast = int.tryParse(aIp.split('.').last) ?? 0;
+      final int bLast = int.tryParse(bIp.split('.').last) ?? 0;
+      return aLast.compareTo(bLast);
+    });
+
+    debugPrint(
+      'EthernetPrinterService: scan found ${found.length} device(s) on port 9100',
+    );
+    return found;
+  }
+
+  /// Tries to open a TCP socket to [ip]:[port] with [timeoutMs] timeout.
+  /// Returns `true` if the connection succeeds, indicating the port is open.
+  Future<bool> _probeHost(String ip, int port, int timeoutMs) async {
+    try {
+      final socket = await Socket.connect(
+        ip,
+        port,
+        timeout: Duration(milliseconds: timeoutMs),
+      );
+      socket.destroy();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Returns the local IPv4 subnet prefix (e.g., "192.168.1") by inspecting
+  /// the device's network interfaces.
+  Future<String?> _getLocalSubnetPrefix() async {
+    try {
+      final interfaces = await NetworkInterface.list();
+      for (final interface in interfaces) {
+        for (final address in interface.addresses) {
+          if (address.type == InternetAddressType.IPv4 && !address.isLoopback) {
+            final parts = address.address.split('.');
+            if (parts.length == 4) {
+              return '${parts[0]}.${parts[1]}.${parts[2]}';
+            }
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('EthernetPrinterService: error listing interfaces: $e');
+    }
+    return null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Name persistence (IP → user-assigned name)
+  // ---------------------------------------------------------------------------
+
+  Future<Map<String, String>> _loadPrinterNames() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final String? json = prefs.getString(_prefPrinterNamesKey);
+      if (json == null || json.isEmpty) return {};
+      return _tryDecode(json);
+    } catch (e) {
+      debugPrint('EthernetPrinterService: error loading printer names: $e');
+      return {};
+    }
+  }
+
+  Future<void> _savePrinterNames(Map<String, String> names) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final String json = _mapToJson(names);
+      await prefs.setString(_prefPrinterNamesKey, json);
+    } catch (e) {
+      debugPrint('EthernetPrinterService: error saving printer names: $e');
+    }
+  }
+
+  /// Saves a user-assigned name for the given Ethernet printer IP.
+  Future<void> savePrinterName(String ip, String name) async {
+    final Map<String, String> names = await _loadPrinterNames();
+    names[ip] = name;
+    await _savePrinterNames(names);
+    debugPrint('EthernetPrinterService: saved name "$name" for $ip');
+  }
+
+  Map<String, String> _tryDecode(String json) {
+    try {
+      final map = <String, String>{};
+      if (json.startsWith('{') && json.endsWith('}')) {
+        final inner = json.substring(1, json.length - 1);
+        if (inner.trim().isEmpty) return map;
+        final regex = RegExp(
+          r'''"([^"\\]*(?:\\.[^"\\]*)*)"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"''',
+        );
+        for (final match in regex.allMatches(inner)) {
+          map[match.group(1)!] = match.group(2)!;
+        }
+      }
+      return map;
+    } catch (_) {
+      return <String, String>{};
+    }
+  }
+
+  String _mapToJson(Map<String, String> map) {
+    final buffer = StringBuffer('{');
+    bool first = true;
+    for (final entry in map.entries) {
+      if (!first) buffer.write(',');
+      first = false;
+      buffer.write('"${entry.key}":"${entry.value}"');
+    }
+    buffer.write('}');
+    return buffer.toString();
   }
 
   // ---------------------------------------------------------------------------
   // Automatic connection (ensureConnected)
   // ---------------------------------------------------------------------------
 
-  /// Tries to connect to the previously-saved USB printer.
+  /// Tries to auto-connect to the last-used Ethernet printer.
   ///
   /// * Returns `true` immediately if already connected.
   /// * If a connection is in progress, waits for it to finish (up to 15s).
-  /// * Only tries the persisted vendor/product IDs — no blind fallback.
-  /// * Returns `false` when no saved printer is found (caller should show
-  ///   the printer-selection dialog).
+  /// * Only tries the persisted IP — no blind fallback.
+  /// * Returns `false` when no saved printer is found or it's unreachable.
   Future<bool> ensureConnected() async {
     if (_isConnected) {
-      debugPrint('UsbPrinterService: already connected');
+      debugPrint('EthernetPrinterService: already connected');
       return true;
     }
 
     if (_isConnecting) {
-      debugPrint('UsbPrinterService: connection in progress, waiting...');
+      debugPrint('EthernetPrinterService: connection in progress, waiting...');
       int waitedMs = 0;
       while (_isConnecting && waitedMs < 15000) {
         await Future.delayed(const Duration(milliseconds: 300));
         waitedMs += 300;
       }
       if (_isConnected) {
-        debugPrint('UsbPrinterService: connected after waiting');
+        debugPrint('EthernetPrinterService: connected after waiting');
         return true;
       }
       if (_isConnecting) {
-        debugPrint('UsbPrinterService: timed out waiting for connection');
+        debugPrint('EthernetPrinterService: timed out waiting for connection');
         return false;
       }
     }
@@ -84,51 +231,43 @@ class UsbPrinterService extends ChangeNotifier {
 
     try {
       final prefs = await SharedPreferences.getInstance();
-      final String? savedVendorStr = prefs.getString(_prefVendorIdKey);
-      final String? savedProductStr = prefs.getString(_prefProductIdKey);
+      final String? savedIp = prefs.getString(_prefLastIpKey);
 
-      if (savedVendorStr == null || savedProductStr == null) {
-        debugPrint('UsbPrinterService: no saved printer');
-        return false;
-      }
-
-      final int? savedVendorId = int.tryParse(savedVendorStr);
-      final int? savedProductId = int.tryParse(savedProductStr);
-
-      if (savedVendorId == null || savedProductId == null) {
-        debugPrint('UsbPrinterService: invalid saved printer IDs');
+      if (savedIp == null || savedIp.isEmpty) {
+        debugPrint('EthernetPrinterService: no saved printer IP');
         return false;
       }
 
       debugPrint(
-        'UsbPrinterService: connecting to saved printer '
-        'VID=$savedVendorId PID=$savedProductId',
+        'EthernetPrinterService: connecting to saved printer $savedIp:9100',
       );
-      return await _usbPrinter.connect(savedVendorId, savedProductId)
-          .then((success) {
-        if (success == true) {
-          _isConnected = true;
-          _connectedDevice = {
-            'vendorId': savedVendorId.toString(),
-            'productId': savedProductId.toString(),
-          };
-          debugPrint(
-            'UsbPrinterService: connected to saved printer '
-            'VID=$savedVendorId PID=$savedProductId',
-          );
-          notifyListeners();
-          return true;
-        }
+
+      final bool success = await _connectToIp(savedIp, 9100);
+
+      if (success) {
+        // Check if we have a saved name.
+        final names = await _loadPrinterNames();
+        _connectedDevice = {
+          'ip': savedIp,
+          'port': 9100,
+          'name': names[savedIp],
+        };
         debugPrint(
-          'UsbPrinterService: failed to connect to saved printer',
+          'EthernetPrinterService: auto-connected to ${names[savedIp] ?? savedIp}',
         );
-        _isConnected = false;
-        _connectedDevice = null;
         notifyListeners();
-        return false;
-      });
+        return true;
+      }
+
+      debugPrint(
+        'EthernetPrinterService: saved printer $savedIp not reachable',
+      );
+      _isConnected = false;
+      _connectedDevice = null;
+      notifyListeners();
+      return false;
     } catch (e) {
-      debugPrint('UsbPrinterService: ensureConnected error: $e');
+      debugPrint('EthernetPrinterService: ensureConnected error: $e');
       _isConnected = false;
       _connectedDevice = null;
       notifyListeners();
@@ -142,80 +281,51 @@ class UsbPrinterService extends ChangeNotifier {
   // Manual connection
   // ---------------------------------------------------------------------------
 
-  /// Connects to a specific USB device identified by [device] (must contain
-  /// `vendorId` and `productId`).
+  /// Connects to the Ethernet printer at [ip] on [port] (default 9100).
   ///
-  /// * Parses IDs safely with `int.tryParse`.
-  /// * Stores `_connectedDevice` only after a successful connection.
-  /// * Resets state on failure.
-  /// * Always clears `_isConnecting` in `finally`.
-  /// * Calls [notifyListeners] on every state change.
-  Future<bool> connectToDevice(Map<String, dynamic> device) async {
+  /// Persists the IP for future auto-connect.
+  Future<bool> connectToPrinter(String ip, {int port = 9100}) async {
     _isConnecting = true;
 
     try {
-      final int? vendorId = int.tryParse(device['vendorId']?.toString() ?? '');
-      final int? productId = int.tryParse(device['productId']?.toString() ?? '');
+      debugPrint('EthernetPrinterService: connecting to $ip:$port...');
 
-      if (vendorId == null || productId == null) {
-        debugPrint(
-          'UsbPrinterService: invalid device IDs – '
-          'vendorId=${device['vendorId']}, productId=${device['productId']}',
-        );
-        _isConnected = false;
-        _connectedDevice = null;
-        notifyListeners();
-        return false;
-      }
+      final bool success = await _connectToIp(ip, port);
 
-      debugPrint(
-        'UsbPrinterService: connecting to VID=$vendorId PID=$productId...',
-      );
-
-      final bool? success = await _usbPrinter.connect(vendorId, productId);
-
-      if (success == true) {
+      if (success) {
         _isConnected = true;
-        _connectedDevice = device;
 
-        // Persist printer identity for future auto-connect.
+        // Load saved name if present.
+        final names = await _loadPrinterNames();
+        _connectedDevice = {
+          'ip': ip,
+          'port': port,
+          'name': names[ip],
+        };
+
+        // Persist last IP for future auto-connect.
         try {
           final prefs = await SharedPreferences.getInstance();
-          await prefs.setString(_prefVendorIdKey, vendorId.toString());
-          await prefs.setString(_prefProductIdKey, productId.toString());
-          debugPrint(
-            'UsbPrinterService: saved printer identity '
-            'VID=$vendorId PID=$productId',
-          );
+          await prefs.setString(_prefLastIpKey, ip);
+          debugPrint('EthernetPrinterService: saved last IP $ip');
         } catch (e) {
-          debugPrint('UsbPrinterService: failed to save printer identity: $e');
+          debugPrint('EthernetPrinterService: failed to save last IP: $e');
         }
 
         debugPrint(
-          'UsbPrinterService: connected to '
-          '${device['productName'] ?? device['deviceName'] ?? 'Unknown USB Printer'}',
+          'EthernetPrinterService: connected to ${names[ip] ?? ip}:$port',
         );
         notifyListeners();
         return true;
       }
 
-      // Connection returned null or false.
-      debugPrint('UsbPrinterService: connection returned $success');
-      _isConnected = false;
-      _connectedDevice = null;
-      notifyListeners();
-      return false;
-    } on PlatformException catch (e) {
-      debugPrint(
-        'UsbPrinterService: platform error connecting to USB printer: '
-        '${e.message}',
-      );
+      debugPrint('EthernetPrinterService: connection failed to $ip:$port');
       _isConnected = false;
       _connectedDevice = null;
       notifyListeners();
       return false;
     } catch (e) {
-      debugPrint('UsbPrinterService: error connecting to USB printer: $e');
+      debugPrint('EthernetPrinterService: error connecting: $e');
       _isConnected = false;
       _connectedDevice = null;
       notifyListeners();
@@ -225,18 +335,34 @@ class UsbPrinterService extends ChangeNotifier {
     }
   }
 
+  Future<bool> _connectToIp(String ip, int port) async {
+    try {
+      _socket = await Socket.connect(
+        ip,
+        port,
+        timeout: const Duration(seconds: 5),
+      );
+      _socket?.setOption(SocketOption.tcpNoDelay, true);
+      debugPrint('EthernetPrinterService: socket connected to $ip:$port');
+      return true;
+    } catch (e) {
+      debugPrint('EthernetPrinterService: socket connect failed: $e');
+      _socket = null;
+      return false;
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Disconnect
   // ---------------------------------------------------------------------------
 
-  /// Disconnects from the USB printer and resets all connection state.
-  /// Always calls [notifyListeners] even if the native close throws.
   Future<void> disconnect() async {
     try {
-      await _usbPrinter.close();
-      debugPrint('UsbPrinterService: USB printer closed');
+      await _socket?.close();
+      _socket = null;
+      debugPrint('EthernetPrinterService: socket closed');
     } catch (e) {
-      debugPrint('UsbPrinterService: error closing USB printer: $e');
+      debugPrint('EthernetPrinterService: error closing socket: $e');
     } finally {
       _isConnected = false;
       _connectedDevice = null;
@@ -248,40 +374,32 @@ class UsbPrinterService extends ChangeNotifier {
   // Print receipt
   // ---------------------------------------------------------------------------
 
-  /// Generates and sends the receipt to the connected USB printer.
+  /// Generates and sends the receipt to the connected Ethernet printer.
   ///
-  /// When [openDrawer] is `true` the cash-drawer kick command is appended to
-  /// the same byte payload after the paper-feed and before the cut.
-  ///
-  /// Returns `true` when the bytes were written successfully (the application
-  /// only knows the command was sent – it cannot confirm that the drawer
-  /// physically opened).
-  ///
-  /// Resets the USB connection state and returns `false` when the write call
-  /// fails or returns a non-success value.
+  /// When [openDrawer] is `true` the cash-drawer kick command is appended.
   Future<bool> printBill(
     Map<String, dynamic> data, {
     bool openDrawer = false,
   }) async {
-    if (!_isConnected) {
-      debugPrint('UsbPrinterService: no USB printer connected');
+    if (!_isConnected || _socket == null) {
+      debugPrint('EthernetPrinterService: no Ethernet printer connected');
       return false;
     }
 
     final Map<String, dynamic> order =
-        data['order'] as Map<String, dynamic>? ?? {};
+        data['order'] as Map<String, dynamic>? ?? <String, dynamic>{};
     final Map<String, dynamic> vendor =
-        data['vendor'] as Map<String, dynamic>? ?? {};
+        data['vendor'] as Map<String, dynamic>? ?? <String, dynamic>{};
 
     if (order.isEmpty && vendor.isEmpty) {
-      debugPrint('UsbPrinterService: receipt dataset payload is empty');
+      debugPrint('EthernetPrinterService: receipt dataset payload is empty');
       return false;
     }
 
     try {
       final profile = await CapabilityProfile.load();
       final generator = Generator(PaperSize.mm80, profile);
-      List<int> bytes = [];
+      List<int> bytes = <int>[];
 
       // =====================================================================
       // 1. VENDOR HEADER BLOCK
@@ -353,7 +471,7 @@ class UsbPrinterService extends ChangeNotifier {
       // =====================================================================
       // 3. ORDER DATA BLOCK (Key-Value Rows)
       // =====================================================================
-      bytes += generator.row([
+      bytes += generator.row(<PosColumn>[
         PosColumn(text: 'Order Type:', width: 6),
         PosColumn(
           text: '${order['orderType'] ?? ''}'.toUpperCase(),
@@ -361,7 +479,7 @@ class UsbPrinterService extends ChangeNotifier {
           styles: const PosStyles(align: PosAlign.right, bold: true),
         ),
       ]);
-      bytes += generator.row([
+      bytes += generator.row(<PosColumn>[
         PosColumn(text: 'Payment:', width: 6),
         PosColumn(
           text: '${order['paymentMethod'] ?? ''}'.toUpperCase(),
@@ -369,7 +487,7 @@ class UsbPrinterService extends ChangeNotifier {
           styles: const PosStyles(align: PosAlign.right, bold: true),
         ),
       ]);
-      bytes += generator.row([
+      bytes += generator.row(<PosColumn>[
         PosColumn(text: 'Cashier :', width: 6),
         PosColumn(
           text: '${order['cashierName'] ?? '-'}',
@@ -377,7 +495,7 @@ class UsbPrinterService extends ChangeNotifier {
           styles: const PosStyles(align: PosAlign.right, bold: true),
         ),
       ]);
-      bytes += generator.row([
+      bytes += generator.row(<PosColumn>[
         PosColumn(text: 'Terminal:', width: 6),
         PosColumn(
           text: '${order['deviceId'] ?? ''}',
@@ -386,12 +504,12 @@ class UsbPrinterService extends ChangeNotifier {
         ),
       ]);
 
-      final List itemsList = order['items'] as List? ?? [];
-      int totalItemCount = itemsList.fold<int>(0, (sum, item) {
+      final List<dynamic> itemsList = order['items'] as List<dynamic>? ?? <dynamic>[];
+      int totalItemCount = itemsList.fold<int>(0, (int sum, dynamic item) {
         return sum + ((item['quantity'] as num?)?.toInt() ?? 0);
       });
 
-      bytes += generator.row([
+      bytes += generator.row(<PosColumn>[
         PosColumn(text: 'Total Items', width: 6),
         PosColumn(
           text: '$totalItemCount',
@@ -405,7 +523,7 @@ class UsbPrinterService extends ChangeNotifier {
       // =====================================================================
       // 4. ITEMS GRID HEADERS
       // =====================================================================
-      bytes += generator.row([
+      bytes += generator.row(<PosColumn>[
         PosColumn(text: 'Item', width: 7, styles: const PosStyles(bold: true)),
         PosColumn(
           text: 'Qty',
@@ -422,7 +540,7 @@ class UsbPrinterService extends ChangeNotifier {
       // =====================================================================
       // 5. PRINTING DYNAMIC ITEMS & SUBITEMS
       // =====================================================================
-      for (var itemDynamic in itemsList) {
+      for (dynamic itemDynamic in itemsList) {
         final Map<String, dynamic> item = itemDynamic as Map<String, dynamic>;
 
         double price = (item['price'] as num? ?? 0.0).toDouble();
@@ -432,11 +550,11 @@ class UsbPrinterService extends ChangeNotifier {
         String itemName = '';
         if (item['menuItemId'] != null && item['menuItemId'] is Map) {
           final Map<dynamic, dynamic> menuItemField =
-              item['menuItemId'] as Map;
+              item['menuItemId'] as Map<dynamic, dynamic>;
           itemName = menuItemField['name']?.toString() ?? '';
         }
 
-        bytes += generator.row([
+        bytes += generator.row(<PosColumn>[
           PosColumn(text: itemName, width: 7),
           PosColumn(
             text: '$qty',
@@ -450,16 +568,16 @@ class UsbPrinterService extends ChangeNotifier {
           ),
         ]);
 
-        final List? selectedOptions = item['selectedOptions'] as List?;
-        final List? subItems = item['subItems'] as List?;
+        final List<dynamic>? selectedOptions = item['selectedOptions'] as List<dynamic>?;
+        final List<dynamic>? subItems = item['subItems'] as List<dynamic>?;
 
         if (selectedOptions != null &&
             selectedOptions.isNotEmpty &&
             (subItems == null || subItems.isEmpty)) {
-          for (var og in selectedOptions) {
-            final List choicesList = og['choices'] as List? ?? [];
+          for (dynamic og in selectedOptions) {
+            final List<dynamic> choicesList = og['choices'] as List<dynamic>? ?? <dynamic>[];
             final String choicesStr =
-                choicesList.map((c) => c['name']?.toString() ?? '').join(', ');
+                choicesList.map((dynamic c) => c['name']?.toString() ?? '').join(', ');
             bytes += generator.text(
               '  ${og['groupName']}: $choicesStr',
               styles: const PosStyles(align: PosAlign.left),
@@ -468,7 +586,7 @@ class UsbPrinterService extends ChangeNotifier {
         }
 
         if (subItems != null && subItems.isNotEmpty) {
-          for (var subDynamic in subItems) {
+          for (dynamic subDynamic in subItems) {
             final Map<String, dynamic> sub = subDynamic as Map<String, dynamic>;
             final int subQty = (sub['quantity'] as num? ?? 1).toInt();
             final String subPrefix = subQty > 1 ? '${subQty}x ' : '';
@@ -478,12 +596,12 @@ class UsbPrinterService extends ChangeNotifier {
               styles: const PosStyles(align: PosAlign.left),
             );
 
-            final List? subOpts = sub['selectedOptions'] as List?;
+            final List<dynamic>? subOpts = sub['selectedOptions'] as List<dynamic>?;
             if (subOpts != null && subOpts.isNotEmpty) {
-              for (var subOg in subOpts) {
-                final List choicesList = subOg['choices'] as List? ?? [];
+              for (dynamic subOg in subOpts) {
+                final List<dynamic> choicesList = subOg['choices'] as List<dynamic>? ?? <dynamic>[];
                 final String choicesStr = choicesList
-                    .map((c) => c['name']?.toString() ?? '')
+                    .map((dynamic c) => c['name']?.toString() ?? '')
                     .join(', ');
                 bytes += generator.text(
                   '    ${subOg['groupName']}: $choicesStr',
@@ -502,7 +620,7 @@ class UsbPrinterService extends ChangeNotifier {
       // =====================================================================
       final double totalPrice =
           (order['totalPrice'] as num? ?? 0.0).toDouble();
-      bytes += generator.row([
+      bytes += generator.row(<PosColumn>[
         PosColumn(
           text: 'TOTAL',
           width: 5,
@@ -531,7 +649,7 @@ class UsbPrinterService extends ChangeNotifier {
       // =====================================================================
       final double subtotalPrice =
           (order['subtotalPrice'] as num? ?? 0.0).toDouble();
-      bytes += generator.row([
+      bytes += generator.row(<PosColumn>[
         PosColumn(text: 'Subtotal', width: 6),
         PosColumn(
           text: 'kr ${subtotalPrice.toStringAsFixed(2)}',
@@ -542,7 +660,7 @@ class UsbPrinterService extends ChangeNotifier {
 
       final double vatPrice = (order['vatPrice'] as num? ?? 0.0).toDouble();
       if (vatPrice > 0) {
-        final Map<String, double> vatRates = {
+        final Map<String, double> vatRates = <String, double>{
           'takeaway': 0.15,
           'dine': 0.25,
           'delivery': 0.15,
@@ -550,7 +668,7 @@ class UsbPrinterService extends ChangeNotifier {
         final double ratePercent =
             (vatRates[order['orderType']] ?? 0.15) * 100;
 
-        bytes += generator.row([
+        bytes += generator.row(<PosColumn>[
           PosColumn(
             text: 'VAT (${ratePercent.toStringAsFixed(0)}%)',
             width: 6,
@@ -576,7 +694,7 @@ class UsbPrinterService extends ChangeNotifier {
           (order['cashChange'] as num? ?? 0.0).toDouble();
 
       if (paymentMethodStr == 'cash' && cashReceived > 0) {
-        bytes += generator.row([
+        bytes += generator.row(<PosColumn>[
           PosColumn(text: 'Cash Received', width: 6),
           PosColumn(
             text: 'kr ${cashReceived.toStringAsFixed(2)}',
@@ -584,7 +702,7 @@ class UsbPrinterService extends ChangeNotifier {
             styles: const PosStyles(align: PosAlign.right),
           ),
         ]);
-        bytes += generator.row([
+        bytes += generator.row(<PosColumn>[
           PosColumn(text: 'Change', width: 6),
           PosColumn(
             text: 'kr ${cashChange.toStringAsFixed(2)}',
@@ -612,7 +730,7 @@ class UsbPrinterService extends ChangeNotifier {
         final String? authResult = transaction['authResult']?.toString();
 
         if (aid != null && aid.isNotEmpty) {
-          bytes += generator.row([
+          bytes += generator.row(<PosColumn>[
             PosColumn(text: 'AID', width: 4),
             PosColumn(
               text: aid,
@@ -622,7 +740,7 @@ class UsbPrinterService extends ChangeNotifier {
           ]);
         }
         if (tvr != null && tvr.isNotEmpty) {
-          bytes += generator.row([
+          bytes += generator.row(<PosColumn>[
             PosColumn(text: 'TVR', width: 4),
             PosColumn(
               text: tvr,
@@ -632,7 +750,7 @@ class UsbPrinterService extends ChangeNotifier {
           ]);
         }
         if (tsi != null && tsi.isNotEmpty) {
-          bytes += generator.row([
+          bytes += generator.row(<PosColumn>[
             PosColumn(text: 'TSI', width: 4),
             PosColumn(
               text: tsi,
@@ -642,7 +760,7 @@ class UsbPrinterService extends ChangeNotifier {
           ]);
         }
         if (ref != null && ref.isNotEmpty) {
-          bytes += generator.row([
+          bytes += generator.row(<PosColumn>[
             PosColumn(text: 'REF', width: 4),
             PosColumn(
               text: ref,
@@ -652,7 +770,7 @@ class UsbPrinterService extends ChangeNotifier {
           ]);
         }
         if (authResult != null && authResult.isNotEmpty) {
-          bytes += generator.row([
+          bytes += generator.row(<PosColumn>[
             PosColumn(text: 'Auth', width: 4),
             PosColumn(
               text: authResult,
@@ -668,7 +786,7 @@ class UsbPrinterService extends ChangeNotifier {
       // 8. FOOTER / BRANDING BLOCK
       // =====================================================================
       final Map<String, dynamic> vendorOthers =
-          vendor['others'] as Map<String, dynamic>? ?? {};
+          vendor['others'] as Map<String, dynamic>? ?? <String, dynamic>{};
       final String receiptMessage =
           vendorOthers['receiptMessage'] as String? ?? 'Takk for deres besøk!';
 
@@ -685,7 +803,7 @@ class UsbPrinterService extends ChangeNotifier {
           order['createdAt']?.toString() ?? DateTime.now().toIso8601String();
       try {
         final DateTime dt = DateTime.parse(createdAtStr);
-        const List<String> months = [
+        const List<String> months = <String>[
           'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
           'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
         ];
@@ -718,39 +836,24 @@ class UsbPrinterService extends ChangeNotifier {
       // =====================================================================
       bytes += generator.feed(3);
 
-      // Cash-drawer command (change pin5 to pin2 if your printer requires it).
-      // See PosDrawer.pin2 / PosDrawer.pin5 enum values.
       if (openDrawer) {
         bytes += generator.drawer(pin: PosDrawer.pin2);
-        debugPrint('UsbPrinterService: cash drawer command appended');
+        debugPrint('EthernetPrinterService: cash drawer command appended');
       }
 
       bytes += generator.cut();
 
       // =====================================================================
-      // 10. CHUNKED USB WRITE – AVOID PRINTER BUFFER OVERFLOW
+      // 10. CHUNKED TCP WRITE – AVOID PRINTER BUFFER OVERFLOW
       // =====================================================================
-      //
-      // USB thermal printers have finite hardware buffers (typically 4–64 KB).
-      // Sending the entire receipt in one monolithic bulk transfer can exceed
-      // the buffer when printing combo deals or orders with many items,
-      // causing silent print failures.
-      //
-      // Splitting the payload into 4 KB chunks and adding a short delay
-      // between writes lets the printer process each chunk before receiving
-      // the next, preventing buffer overruns.
-      // =====================================================================
-
-      // 4 KB chunks – well within the buffer of virtually all thermal printers.
-      const int chunkSize = _usbChunkSize;
+      const int chunkSize = _tcpChunkSize;
 
       debugPrint(
-        'UsbPrinterService: sending ${bytes.length} bytes in '
-        '${(bytes.length / chunkSize).ceil()} chunk(s) to USB printer '
+        'EthernetPrinterService: sending ${bytes.length} bytes in '
+        '${(bytes.length / chunkSize).ceil()} chunk(s) to Ethernet printer '
         '(drawer: $openDrawer)',
       );
 
-      bool? writeResult;
       try {
         for (int offset = 0; offset < bytes.length; offset += chunkSize) {
           final int end = (offset + chunkSize > bytes.length)
@@ -758,45 +861,23 @@ class UsbPrinterService extends ChangeNotifier {
               : offset + chunkSize;
           final List<int> chunk = bytes.sublist(offset, end);
 
-          final bool? chunkResult =
-              await _usbPrinter.write(Uint8List.fromList(chunk));
+          _socket!.add(Uint8List.fromList(chunk));
+          await _socket!.flush();
 
-          if (chunkResult != true) {
-            debugPrint(
-              'UsbPrinterService: USB write failed at chunk '
-              '${(offset / chunkSize).floor() + 1} '
-              '(offset $offset, size ${chunk.length})',
-            );
-            writeResult = false;
-            break;
-          }
-
-          // Small delay between chunks so the printer can drain its buffer.
           if (end < bytes.length) {
             await Future<void>.delayed(const Duration(milliseconds: 60));
           }
         }
       } catch (e) {
-        debugPrint('UsbPrinterService: USB write threw exception: $e');
+        debugPrint('EthernetPrinterService: TCP write threw exception: $e');
         _resetConnectionState();
         return false;
       }
 
-      if (writeResult == false) {
-        debugPrint('UsbPrinterService: USB write returned false');
-        _resetConnectionState();
-        return false;
-      }
-
-      debugPrint('UsbPrinterService: receipt sent successfully');
+      debugPrint('EthernetPrinterService: receipt sent successfully');
       return true;
-    } on PlatformException catch (e) {
-      debugPrint(
-        'UsbPrinterService: platform error printing: ${e.message}',
-      );
-      return false;
     } catch (e) {
-      debugPrint('UsbPrinterService: error printing USB bill: $e');
+      debugPrint('EthernetPrinterService: error printing Ethernet bill: $e');
       return false;
     }
   }
@@ -805,12 +886,16 @@ class UsbPrinterService extends ChangeNotifier {
   // Internal helpers
   // ---------------------------------------------------------------------------
 
-  /// Resets connection state after a write failure so the next print attempt
-  /// will try to reconnect.
   void _resetConnectionState() {
     _isConnected = false;
     _connectedDevice = null;
+    try {
+      _socket?.close();
+    } catch (_) {}
+    _socket = null;
     notifyListeners();
-    debugPrint('UsbPrinterService: connection state reset after write failure');
+    debugPrint(
+      'EthernetPrinterService: connection state reset after write failure',
+    );
   }
 }

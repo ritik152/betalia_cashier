@@ -5,6 +5,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 import '../services/usb_printer_service.dart';
+import '../services/ethernet_printer_service.dart';
+import '../widgets/printer_selection_dialog.dart';
 
 class WebViewScreen extends StatefulWidget {
   const WebViewScreen({super.key});
@@ -17,8 +19,13 @@ class _WebViewScreenState extends State<WebViewScreen> {
   static const platform = MethodChannel('com.betalia.payments/p630');
   late final WebViewController controller;
   final UsbPrinterService _usbPrinterService = UsbPrinterService();
+  final EthernetPrinterService _ethernetPrinterService =
+      EthernetPrinterService();
 
   bool isLoading = true;
+
+  /// Tracks which printer type is currently active: 'usb' or 'ethernet'.
+  String? _activePrinterType;
 
   // Terminal configuration
   String _terminalIpAddress = '';
@@ -28,9 +35,25 @@ class _WebViewScreenState extends State<WebViewScreen> {
   void initState() {
     super.initState();
 
-    // Attempt USB printer connection after the first frame.
+    // Attempt printer connection after the first frame.
+    // Try Ethernet first, then USB — whichever succeeds first becomes active.
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      await _usbPrinterService.ensureConnected();
+      final bool ethernetReady =
+          await _ethernetPrinterService.ensureConnected();
+      if (ethernetReady) {
+        _activePrinterType = 'ethernet';
+        debugPrint('WebViewScreen: Ethernet printer auto-connected');
+        return;
+      }
+
+      final bool usbReady = await _usbPrinterService.ensureConnected();
+      if (usbReady) {
+        _activePrinterType = 'usb';
+        debugPrint('WebViewScreen: USB printer auto-connected');
+        return;
+      }
+
+      debugPrint('WebViewScreen: no printer auto-connected');
     });
 
     controller = WebViewController()
@@ -86,7 +109,7 @@ class _WebViewScreenState extends State<WebViewScreen> {
         ),
       )
       ..loadRequest(
-        Uri.parse('http://10.0.2.2:3000/bakeri/cashier'),
+        Uri.parse('https://betalia.no/bakeri/cashier'),
       );
 
     // Configure Android WebView for sharp rendering on tablet screens.
@@ -430,6 +453,7 @@ class _WebViewScreenState extends State<WebViewScreen> {
         'authResult': result['authResult'],
         'transactionId': result['transactionId'],
         'rrn': result['rrn'],
+        'data': result, // Full native payment result (AID, TVR, TSI, REF, etc.)
       });
 
       if (mounted) {
@@ -488,30 +512,94 @@ class _WebViewScreenState extends State<WebViewScreen> {
       final bool shouldOpenDrawer =
           !isCopy && (paymentMethod == 'cash' || paymentMethod == 'kontant');
 
-      // Ensure USB printer is connected (auto-reconnect if needed).
-      final bool usbReady = await _usbPrinterService.ensureConnected();
+      // Determine which printer is connected (Ethernet or USB).
+      // Try the last-used type first, then the other.
+      bool printerReady = false;
 
-      if (!usbReady) {
-        _sendToWebView('onPrintResult', {
-          'success': false,
-          'error': 'USB printer not connected or not found',
-        });
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('USB printer not connected or not found'),
-              backgroundColor: Colors.red,
-            ),
-          );
+      if (_activePrinterType == 'ethernet' &&
+          _ethernetPrinterService.isConnected) {
+        printerReady = true;
+      } else if (_activePrinterType == 'usb' &&
+          _usbPrinterService.isConnected) {
+        printerReady = true;
+      } else {
+        // Auto-reconnect: try Ethernet then USB.
+        final bool ethernetReady =
+            await _ethernetPrinterService.ensureConnected();
+        if (ethernetReady) {
+          _activePrinterType = 'ethernet';
+          printerReady = true;
+        } else {
+          final bool usbReady =
+              await _usbPrinterService.ensureConnected();
+          if (usbReady) {
+            _activePrinterType = 'usb';
+            printerReady = true;
+          }
         }
-        return;
       }
 
-      // Send receipt and optional drawer command to the USB printer.
-      final bool success = await _usbPrinterService.printBill(
-        receiptData,
-        openDrawer: shouldOpenDrawer,
-      );
+      if (!printerReady) {
+        // Auto-connect failed — show the tabbed printer selection dialog.
+        final bool? selected = await showDialog<bool>(
+          context: context,
+          builder: (context) => const PrinterSelectionDialog(),
+        );
+
+        if (selected != true) {
+          _sendToWebView('onPrintResult', {
+            'success': false,
+            'error': 'Printer not connected',
+          });
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Printer not connected'),
+                backgroundColor: Colors.red,
+              ),
+            );
+          }
+          return;
+        }
+
+        // Determine which printer type was connected from the dialog.
+        if (_ethernetPrinterService.isConnected) {
+          _activePrinterType = 'ethernet';
+        } else if (_usbPrinterService.isConnected) {
+          _activePrinterType = 'usb';
+        } else {
+          _sendToWebView('onPrintResult', {
+            'success': false,
+            'error': 'No printer selected',
+          });
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('No printer selected'),
+                backgroundColor: Colors.red,
+              ),
+            );
+          }
+          return;
+        }
+      }
+
+      // Send receipt and optional drawer command to the active printer.
+      late final bool success;
+
+      if (_activePrinterType == 'ethernet') {
+        success = await _ethernetPrinterService.printBill(
+          receiptData,
+          openDrawer: shouldOpenDrawer,
+        );
+        debugPrint('WebViewScreen: printed via Ethernet printer');
+      } else {
+        success = await _usbPrinterService.printBill(
+          receiptData,
+          openDrawer: shouldOpenDrawer,
+        );
+        debugPrint('WebViewScreen: printed via USB printer');
+      }
 
       if (success) {
         _sendToWebView('onPrintResult', {
