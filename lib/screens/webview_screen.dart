@@ -399,22 +399,55 @@ class _WebViewScreenState extends State<WebViewScreen> {
 
   void _startPayment(Map<String, dynamic> data) async {
     try {
-      // CHECK TERMINAL STATUS FIRST — prevent crash when not connected
-      final String statusJson = await platform.invokeMethod('checkTerminalStatus');
-      final statusResult = jsonDecode(statusJson);
-      final connected = statusResult['status'] == 'CONNECTED';
+      // FORCE FRESH CONNECTION — reconnect terminal to prevent stale socket issues
+      final preferences = await SharedPreferences.getInstance();
+      final ipAddress = preferences.getString('terminalIpAddress') ?? '';
+      final serialNumber = preferences.getString('terminalSerialNumber') ?? '';
+      final instanceId = preferences.getString('terminalInstanceId') ?? '';
+      final posDeviceId = preferences.getString('terminalPosDeviceId') ?? '';
 
-      if (!connected) {
-        debugPrint('Payment blocked — terminal not connected');
+      if (ipAddress.isEmpty ||
+          serialNumber.isEmpty ||
+          instanceId.isEmpty ||
+          posDeviceId.isEmpty) {
+        debugPrint('Payment blocked — terminal not configured');
         _sendToWebView('onPaymentResult', {
           'success': false,
-          'status': 'NOT_CONNECTED',
-          'error': 'Terminal not connected. Please configure the P630 first.',
+          'status': 'NOT_CONFIGURED',
+          'error': 'Terminal not configured. Please configure the P630 first.',
         });
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text('Terminal not connected. Cannot process payment.'),
+              content: Text('Terminal not configured. Cannot process payment.'),
+              backgroundColor: Colors.orange,
+              duration: Duration(seconds: 4),
+            ),
+          );
+        }
+        return;
+      }
+
+      final String? connectResult = await _configureTerminal({
+        'payload': {
+          'ipAddress': ipAddress,
+          'serialNumber': serialNumber,
+          'instanceId': instanceId,
+          'posDeviceId': posDeviceId,
+        }
+      });
+
+      if (connectResult != 'CONNECTED') {
+        debugPrint('Payment blocked — terminal not reachable');
+        _sendToWebView('onPaymentResult', {
+          'success': false,
+          'status': 'NOT_CONNECTED',
+          'error': 'Terminal not reachable. Please check the terminal and try again.',
+        });
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Terminal not reachable. Cannot process payment.'),
               backgroundColor: Colors.orange,
               duration: Duration(seconds: 4),
             ),

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:esc_pos_utils_plus/esc_pos_utils_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../utils/printer_text_utils.dart';
 
 class EthernetPrinterService extends ChangeNotifier {
   static final EthernetPrinterService _instance =
@@ -404,7 +405,7 @@ class EthernetPrinterService extends ChangeNotifier {
       // =====================================================================
       // 1. VENDOR HEADER BLOCK
       // =====================================================================
-      final String vendorName = vendor['name'] as String? ?? 'Restaurant';
+      final String vendorName = stripEmojis(vendor['name'] as String? ?? 'Restaurant');
       bytes += generator.text(
         vendorName,
         styles: const PosStyles(
@@ -417,26 +418,26 @@ class EthernetPrinterService extends ChangeNotifier {
 
       if (vendor['address'] != null) {
         bytes += generator.text(
-          vendor['address'] as String,
+          stripEmojis(vendor['address'] as String),
           styles: const PosStyles(align: PosAlign.center),
         );
       }
       if (vendor['city'] != null) {
-        final String zip = vendor['zipCode'] as String? ?? '';
+        final String zip = stripEmojis(vendor['zipCode'] as String? ?? '');
         bytes += generator.text(
-          '${vendor['city']} $zip'.trim(),
+          stripEmojis('${vendor['city']} $zip'.trim()),
           styles: const PosStyles(align: PosAlign.center),
         );
       }
       if (vendor['phone'] != null) {
         bytes += generator.text(
-          'Tel: ${vendor['phone']}',
+          stripEmojis('Tel: ${vendor['phone']}'),
           styles: const PosStyles(align: PosAlign.center),
         );
       }
       if (vendor['organizationId'] != null) {
         bytes += generator.text(
-          'Org ID: ${vendor['organizationId']}',
+          stripEmojis('Org ID: ${vendor['organizationId']}'),
           styles: const PosStyles(align: PosAlign.center),
         );
       }
@@ -450,18 +451,18 @@ class EthernetPrinterService extends ChangeNotifier {
       final String receiptLabel =
           isCopy ? 'KOPIKVITTERING' : 'SALGSKVITTERING';
       bytes += generator.text(
-        receiptLabel,
+        stripEmojis(receiptLabel),
         styles: const PosStyles(align: PosAlign.center, bold: true),
       );
       bytes += generator.text(
-        'Receipt - ${order['orderNumber'] ?? ''}',
+        stripEmojis('Receipt - ${order['orderNumber'] ?? ''}'),
         styles: const PosStyles(align: PosAlign.center, bold: true),
       );
       final String transactionIdStr =
-          order['transactionId']?.toString() ?? '';
+          stripEmojis(order['transactionId']?.toString() ?? '');
       if (transactionIdStr.isNotEmpty) {
         bytes += generator.text(
-          'Transaction ID: $transactionIdStr',
+          stripEmojis('Transaction ID: $transactionIdStr'),
           styles: const PosStyles(align: PosAlign.center),
         );
       }
@@ -474,7 +475,7 @@ class EthernetPrinterService extends ChangeNotifier {
       bytes += generator.row(<PosColumn>[
         PosColumn(text: 'Order Type:', width: 6),
         PosColumn(
-          text: '${order['orderType'] ?? ''}'.toUpperCase(),
+          text: stripEmojis('${order['orderType'] ?? ''}'.toUpperCase()),
           width: 6,
           styles: const PosStyles(align: PosAlign.right, bold: true),
         ),
@@ -482,7 +483,7 @@ class EthernetPrinterService extends ChangeNotifier {
       bytes += generator.row(<PosColumn>[
         PosColumn(text: 'Payment:', width: 6),
         PosColumn(
-          text: '${order['paymentMethod'] ?? ''}'.toUpperCase(),
+          text: stripEmojis('${order['paymentMethod'] ?? ''}'.toUpperCase()),
           width: 6,
           styles: const PosStyles(align: PosAlign.right, bold: true),
         ),
@@ -490,7 +491,7 @@ class EthernetPrinterService extends ChangeNotifier {
       bytes += generator.row(<PosColumn>[
         PosColumn(text: 'Cashier :', width: 6),
         PosColumn(
-          text: '${order['cashierName'] ?? '-'}',
+          text: stripEmojis('${order['cashierName'] ?? '-'}'),
           width: 6,
           styles: const PosStyles(align: PosAlign.right, bold: true),
         ),
@@ -498,7 +499,7 @@ class EthernetPrinterService extends ChangeNotifier {
       bytes += generator.row(<PosColumn>[
         PosColumn(text: 'Terminal:', width: 6),
         PosColumn(
-          text: '${order['deviceId'] ?? ''}',
+          text: stripEmojis('${order['deviceId'] ?? ''}'),
           width: 6,
           styles: const PosStyles(align: PosAlign.right, bold: true),
         ),
@@ -551,7 +552,7 @@ class EthernetPrinterService extends ChangeNotifier {
         if (item['menuItemId'] != null && item['menuItemId'] is Map) {
           final Map<dynamic, dynamic> menuItemField =
               item['menuItemId'] as Map<dynamic, dynamic>;
-          itemName = menuItemField['name']?.toString() ?? '';
+          itemName = stripEmojis(menuItemField['name']?.toString() ?? '');
         }
 
         bytes += generator.row(<PosColumn>[
@@ -577,9 +578,9 @@ class EthernetPrinterService extends ChangeNotifier {
           for (dynamic og in selectedOptions) {
             final List<dynamic> choicesList = og['choices'] as List<dynamic>? ?? <dynamic>[];
             final String choicesStr =
-                choicesList.map((dynamic c) => c['name']?.toString() ?? '').join(', ');
+                choicesList.map((dynamic c) => stripEmojis(c['name']?.toString() ?? '')).join(', ');
             bytes += generator.text(
-              '  ${og['groupName']}: $choicesStr',
+              stripEmojis('  ${og['groupName']}: $choicesStr'),
               styles: const PosStyles(align: PosAlign.left),
             );
           }
@@ -592,7 +593,7 @@ class EthernetPrinterService extends ChangeNotifier {
             final String subPrefix = subQty > 1 ? '${subQty}x ' : '';
 
             bytes += generator.text(
-              '  $subPrefix${sub['name'] ?? ''}',
+              stripEmojis('  $subPrefix${sub['name'] ?? ''}'),
               styles: const PosStyles(align: PosAlign.left),
             );
 
@@ -601,10 +602,10 @@ class EthernetPrinterService extends ChangeNotifier {
               for (dynamic subOg in subOpts) {
                 final List<dynamic> choicesList = subOg['choices'] as List<dynamic>? ?? <dynamic>[];
                 final String choicesStr = choicesList
-                    .map((dynamic c) => c['name']?.toString() ?? '')
+                    .map((dynamic c) => stripEmojis(c['name']?.toString() ?? ''))
                     .join(', ');
                 bytes += generator.text(
-                  '    ${subOg['groupName']}: $choicesStr',
+                  stripEmojis('    ${subOg['groupName']}: $choicesStr'),
                   styles: const PosStyles(align: PosAlign.left),
                 );
               }
@@ -648,7 +649,7 @@ class EthernetPrinterService extends ChangeNotifier {
       // 7. TAXES SUMMARY
       // =====================================================================
       final double subtotalPrice =
-          (order['subtotalPrice'] as num? ?? 0.0).toDouble();
+          (order['totalWithoutVat'] as num? ?? 0.0).toDouble();
       bytes += generator.row(<PosColumn>[
         PosColumn(text: 'Subtotal', width: 6),
         PosColumn(
@@ -733,7 +734,7 @@ class EthernetPrinterService extends ChangeNotifier {
           bytes += generator.row(<PosColumn>[
             PosColumn(text: 'AID', width: 4),
             PosColumn(
-              text: aid,
+              text: stripEmojis(aid),
               width: 8,
               styles: const PosStyles(align: PosAlign.right),
             ),
@@ -743,7 +744,7 @@ class EthernetPrinterService extends ChangeNotifier {
           bytes += generator.row(<PosColumn>[
             PosColumn(text: 'TVR', width: 4),
             PosColumn(
-              text: tvr,
+              text: stripEmojis(tvr),
               width: 8,
               styles: const PosStyles(align: PosAlign.right),
             ),
@@ -753,7 +754,7 @@ class EthernetPrinterService extends ChangeNotifier {
           bytes += generator.row(<PosColumn>[
             PosColumn(text: 'TSI', width: 4),
             PosColumn(
-              text: tsi,
+              text: stripEmojis(tsi),
               width: 8,
               styles: const PosStyles(align: PosAlign.right),
             ),
@@ -763,7 +764,7 @@ class EthernetPrinterService extends ChangeNotifier {
           bytes += generator.row(<PosColumn>[
             PosColumn(text: 'REF', width: 4),
             PosColumn(
-              text: ref,
+              text: stripEmojis(ref),
               width: 8,
               styles: const PosStyles(align: PosAlign.right),
             ),
@@ -773,7 +774,7 @@ class EthernetPrinterService extends ChangeNotifier {
           bytes += generator.row(<PosColumn>[
             PosColumn(text: 'Auth', width: 4),
             PosColumn(
-              text: authResult,
+              text: stripEmojis(authResult),
               width: 8,
               styles: const PosStyles(align: PosAlign.right),
             ),
@@ -791,11 +792,11 @@ class EthernetPrinterService extends ChangeNotifier {
           vendorOthers['receiptMessage'] as String? ?? 'Takk for deres besøk!';
 
       bytes += generator.text(
-        receiptMessage,
+        stripEmojis(receiptMessage),
         styles: const PosStyles(align: PosAlign.center, bold: true),
       );
       bytes += generator.text(
-        vendorName,
+        stripEmojis(vendorName),
         styles: const PosStyles(align: PosAlign.center),
       );
 
@@ -818,7 +819,7 @@ class EthernetPrinterService extends ChangeNotifier {
         );
       } catch (_) {
         bytes += generator.text(
-          createdAtStr,
+          stripEmojis(createdAtStr),
           styles: const PosStyles(align: PosAlign.center),
         );
       }
@@ -826,7 +827,7 @@ class EthernetPrinterService extends ChangeNotifier {
       if (vendor['website'] != null &&
           (vendor['website'] as String).trim().isNotEmpty) {
         bytes += generator.text(
-          vendor['website'] as String,
+          stripEmojis(vendor['website'] as String),
           styles: const PosStyles(align: PosAlign.center),
         );
       }
