@@ -1,3 +1,4 @@
+import 'dart:collection';
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
@@ -23,6 +24,7 @@ class EthernetPrinterService extends ChangeNotifier {
 
   // SharedPreferences keys
   static const String _prefLastIpKey = 'ethernet_printer_last_ip';
+  static const String _prefLastPortKey = 'ethernet_printer_last_port';
   static const String _prefPrinterNamesKey = 'ethernet_printer_names';
 
   /// USB chunk size for print writes (4 KB).
@@ -32,7 +34,7 @@ class EthernetPrinterService extends ChangeNotifier {
   // Network scan for port 9100 devices
   // ---------------------------------------------------------------------------
 
-  /// Scans the local subnet for devices with port 9100 open.
+  /// Scans all local subnets for devices with port 9100 open.
   ///
   /// Returns a list of [Map]s with keys:
   ///   - `ip` (String): the IP address
@@ -42,41 +44,61 @@ class EthernetPrinterService extends ChangeNotifier {
     // Load previously saved names.
     final Map<String, String> savedNames = await _loadPrinterNames();
 
-    // Determine the local subnet prefix.
-    final String? subnetPrefix = await _getLocalSubnetPrefix();
-    if (subnetPrefix == null) {
-      debugPrint('EthernetPrinterService: could not determine local subnet');
+    // Gather every unique subnet prefix across all network interfaces.
+    final Set<String> subnetPrefixes = await _getLocalSubnetPrefixes();
+    if (subnetPrefixes.isEmpty) {
+      debugPrint('EthernetPrinterService: could not determine any local subnet');
       return [];
     }
 
-    final List<Map<String, dynamic>> found = [];
+    debugPrint(
+      'EthernetPrinterService: scanning ${subnetPrefixes.length} subnet(s): '
+      '${subnetPrefixes.join(", ")}',
+    );
+
+    final LinkedHashMap<String, Map<String, dynamic>> foundMap =
+        LinkedHashMap<String, Map<String, dynamic>>();
     const int port = 9100;
     const int timeoutMs = 500;
 
-    // Probe all 254 addresses concurrently in batches of 50.
-    final List<Future<void>> futures = [];
-    for (int host = 1; host <= 254; host++) {
-      final String ip = '$subnetPrefix.$host';
-      futures.add(
-        _probeHost(ip, port, timeoutMs).then((reachable) {
-          if (reachable) {
-            found.add({
-              'ip': ip,
-              'port': port,
-              'name': savedNames[ip],
-            });
-          }
-        }),
-      );
-      // Batch every 50 to avoid overwhelming the network stack.
-      if (futures.length >= 50) {
-        await Future.wait(futures);
-        futures.clear();
+    for (final String subnetPrefix in subnetPrefixes) {
+      final int subnetFoundBefore = foundMap.length;
+
+      // Probe all 254 addresses concurrently in batches of 50.
+      final List<Future<void>> futures = [];
+      for (int host = 1; host <= 254; host++) {
+        final String ip = '$subnetPrefix.$host';
+        futures.add(
+          _probeHost(ip, port, timeoutMs).then((reachable) {
+            if (reachable) {
+              foundMap.putIfAbsent(
+                ip,
+                () => {
+                  'ip': ip,
+                  'port': port,
+                  'name': savedNames[ip],
+                },
+              );
+            }
+          }),
+        );
+        // Batch every 50 to avoid overwhelming the network stack.
+        if (futures.length >= 50) {
+          await Future.wait(futures);
+          futures.clear();
+        }
       }
+      if (futures.isNotEmpty) {
+        await Future.wait(futures);
+      }
+
+      debugPrint(
+        'EthernetPrinterService: subnet $subnetPrefix → '
+        '${foundMap.length - subnetFoundBefore} device(s)',
+      );
     }
-    if (futures.isNotEmpty) {
-      await Future.wait(futures);
-    }
+
+    final List<Map<String, dynamic>> found = foundMap.values.toList();
 
     // Sort by IP (last octet ascending).
     found.sort((a, b) {
@@ -88,7 +110,8 @@ class EthernetPrinterService extends ChangeNotifier {
     });
 
     debugPrint(
-      'EthernetPrinterService: scan found ${found.length} device(s) on port 9100',
+      'EthernetPrinterService: total found ${found.length} device(s) '
+      'across all subnets',
     );
     return found;
   }
@@ -109,9 +132,10 @@ class EthernetPrinterService extends ChangeNotifier {
     }
   }
 
-  /// Returns the local IPv4 subnet prefix (e.g., "192.168.1") by inspecting
-  /// the device's network interfaces.
-  Future<String?> _getLocalSubnetPrefix() async {
+  /// Returns all unique local IPv4 subnet prefixes (e.g. {"192.168.1", "192.168.0"})
+  /// by inspecting every network interface on the device.
+  Future<Set<String>> _getLocalSubnetPrefixes() async {
+    final Set<String> prefixes = <String>{};
     try {
       final interfaces = await NetworkInterface.list();
       for (final interface in interfaces) {
@@ -119,7 +143,7 @@ class EthernetPrinterService extends ChangeNotifier {
           if (address.type == InternetAddressType.IPv4 && !address.isLoopback) {
             final parts = address.address.split('.');
             if (parts.length == 4) {
-              return '${parts[0]}.${parts[1]}.${parts[2]}';
+              prefixes.add('${parts[0]}.${parts[1]}.${parts[2]}');
             }
           }
         }
@@ -127,7 +151,7 @@ class EthernetPrinterService extends ChangeNotifier {
     } catch (e) {
       debugPrint('EthernetPrinterService: error listing interfaces: $e');
     }
-    return null;
+    return prefixes;
   }
 
   // ---------------------------------------------------------------------------
@@ -239,22 +263,24 @@ class EthernetPrinterService extends ChangeNotifier {
         return false;
       }
 
+      final int savedPort = prefs.getInt(_prefLastPortKey) ?? 9100;
+
       debugPrint(
-        'EthernetPrinterService: connecting to saved printer $savedIp:9100',
+        'EthernetPrinterService: connecting to saved printer $savedIp:$savedPort',
       );
 
-      final bool success = await _connectToIp(savedIp, 9100);
+      final bool success = await _connectToIp(savedIp, savedPort);
 
       if (success) {
         // Check if we have a saved name.
         final names = await _loadPrinterNames();
         _connectedDevice = {
           'ip': savedIp,
-          'port': 9100,
+          'port': savedPort,
           'name': names[savedIp],
         };
         debugPrint(
-          'EthernetPrinterService: auto-connected to ${names[savedIp] ?? savedIp}',
+          'EthernetPrinterService: auto-connected to ${names[savedIp] ?? savedIp}:$savedPort',
         );
         notifyListeners();
         return true;
@@ -304,13 +330,14 @@ class EthernetPrinterService extends ChangeNotifier {
           'name': names[ip],
         };
 
-        // Persist last IP for future auto-connect.
+        // Persist last IP and port for future auto-connect.
         try {
           final prefs = await SharedPreferences.getInstance();
           await prefs.setString(_prefLastIpKey, ip);
-          debugPrint('EthernetPrinterService: saved last IP $ip');
+          await prefs.setInt(_prefLastPortKey, port);
+          debugPrint('EthernetPrinterService: saved last IP $ip:$port');
         } catch (e) {
-          debugPrint('EthernetPrinterService: failed to save last IP: $e');
+          debugPrint('EthernetPrinterService: failed to save last IP/port: $e');
         }
 
         debugPrint(
@@ -497,9 +524,9 @@ class EthernetPrinterService extends ChangeNotifier {
         ),
       ]);
       bytes += generator.row(<PosColumn>[
-        PosColumn(text: 'Terminal:', width: 6),
+        PosColumn(text: 'Terminal -', width: 6),
         PosColumn(
-          text: stripEmojis('${order['deviceId'] ?? ''}'),
+          text: stripEmojis('${order['terminalSerialNumber'] ?? order['deviceId'] ?? ''}'),
           width: 6,
           styles: const PosStyles(align: PosAlign.right, bold: true),
         ),

@@ -17,7 +17,7 @@ class _PrinterSelectionDialogState extends State<PrinterSelectionDialog>
 
   late final TabController _tabController;
 
-  // USB tab state (unchanged)
+  // USB tab state
   List<Map<String, dynamic>> _usbDevices = [];
   bool _usbLoading = true;
 
@@ -25,6 +25,12 @@ class _PrinterSelectionDialogState extends State<PrinterSelectionDialog>
   List<Map<String, dynamic>> _ethernetDevices = [];
   bool _ethernetLoading = false;
   bool _ethernetScanned = false;
+
+  // Manual entry form controllers
+  final _ipController = TextEditingController();
+  final _portController = TextEditingController(text: '9100');
+  final _nameController = TextEditingController();
+  bool _manualConnecting = false;
 
   @override
   void initState() {
@@ -42,11 +48,14 @@ class _PrinterSelectionDialogState extends State<PrinterSelectionDialog>
   @override
   void dispose() {
     _tabController.dispose();
+    _ipController.dispose();
+    _portController.dispose();
+    _nameController.dispose();
     super.dispose();
   }
 
   // ---------------------------------------------------------------------------
-  // USB tab (unchanged from original)
+  // USB tab
   // ---------------------------------------------------------------------------
 
   Future<void> _getUsbDevices() async {
@@ -100,7 +109,8 @@ class _PrinterSelectionDialogState extends State<PrinterSelectionDialog>
 
     if (!mounted) return;
 
-    final success = await _ethernetPrinterService.connectToPrinter(ip, port: port);
+    final success =
+        await _ethernetPrinterService.connectToPrinter(ip, port: port);
 
     if (mounted) {
       if (success) {
@@ -115,6 +125,62 @@ class _PrinterSelectionDialogState extends State<PrinterSelectionDialog>
     }
   }
 
+  Future<void> _manualConnect() async {
+    final ip = _ipController.text.trim();
+    final portText = _portController.text.trim();
+    final name = _nameController.text.trim();
+
+    if (ip.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please enter an IP address')),
+      );
+      return;
+    }
+
+    final int? port = int.tryParse(portText);
+    if (port == null || port < 1 || port > 65535) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please enter a valid port (1-65535)')),
+      );
+      return;
+    }
+
+    if (name.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please enter a name for this printer')),
+      );
+      return;
+    }
+
+    setState(() => _manualConnecting = true);
+
+    try {
+      // Save the name first
+      await _ethernetPrinterService.savePrinterName(ip, name);
+
+      if (!mounted) return;
+
+      final success =
+          await _ethernetPrinterService.connectToPrinter(ip, port: port);
+
+      if (mounted) {
+        if (success) {
+          Navigator.pop(context, true);
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Failed to connect to printer. Check IP and port.'),
+            ),
+          );
+        }
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _manualConnecting = false);
+      }
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Build
   // ---------------------------------------------------------------------------
@@ -125,7 +191,7 @@ class _PrinterSelectionDialogState extends State<PrinterSelectionDialog>
       title: const Text('Select Printer'),
       content: SizedBox(
         width: double.maxFinite,
-        height: 440,
+        height: 480,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -141,7 +207,7 @@ class _PrinterSelectionDialogState extends State<PrinterSelectionDialog>
                 controller: _tabController,
                 children: [
                   // ============================================================
-                  // USB PRINTER TAB (unchanged from original)
+                  // USB PRINTER TAB
                   // ============================================================
                   _usbLoading
                       ? const Center(child: CircularProgressIndicator())
@@ -170,22 +236,20 @@ class _PrinterSelectionDialogState extends State<PrinterSelectionDialog>
                                           'VID: ${device['vendorId']} PID: ${device['productId']}',
                                         ),
                                         onTap: () async {
-                                          final success =
-                                              await _usbPrinterService
-                                                  .connectToDevice(device);
-                                          if (mounted) {
-                                            if (success) {
-                                              Navigator.pop(context, true);
-                                            } else {
-                                              ScaffoldMessenger.of(context)
-                                                  .showSnackBar(
-                                                const SnackBar(
-                                                  content: Text(
-                                                    'Failed to connect USB',
-                                                  ),
+                                          final success = await _usbPrinterService
+                                              .connectToDevice(device);
+                                          if (!mounted) return;
+                                          if (success) {
+                                            Navigator.pop(context, true);
+                                          } else {
+                                            ScaffoldMessenger.of(context)
+                                                .showSnackBar(
+                                              const SnackBar(
+                                                content: Text(
+                                                  'Failed to connect USB',
                                                 ),
-                                              );
-                                            }
+                                              ),
+                                            );
                                           }
                                         },
                                       );
@@ -193,7 +257,8 @@ class _PrinterSelectionDialogState extends State<PrinterSelectionDialog>
                                   ),
                                 ),
                                 Padding(
-                                  padding: const EdgeInsets.only(top: 4.0, bottom: 4.0),
+                                  padding: const EdgeInsets.only(
+                                      top: 4.0, bottom: 4.0),
                                   child: TextButton.icon(
                                     onPressed: _getUsbDevices,
                                     icon: const Icon(Icons.refresh),
@@ -206,92 +271,165 @@ class _PrinterSelectionDialogState extends State<PrinterSelectionDialog>
                   // ============================================================
                   // ETHERNET PRINTER TAB
                   // ============================================================
-                  _ethernetLoading
-                      ? const Center(child: CircularProgressIndicator())
-                      : _ethernetDevices.isEmpty
-                          ? Center(
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  const Text(
-                                    'No Ethernet printers found on port 9100.\nTap Scan to search your network.',
-                                    textAlign: TextAlign.center,
-                                  ),
-                                  const SizedBox(height: 16),
-                                  ElevatedButton.icon(
-                                    onPressed: _scanEthernet,
-                                    icon: const Icon(Icons.search),
-                                    label: const Text('Scan Network'),
-                                  ),
-                                ],
-                              ),
-                            )
-                          : Column(
-                              children: [
-                                Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    vertical: 4.0,
-                                  ),
-                                  child: Row(
-                                    mainAxisAlignment:
-                                        MainAxisAlignment.spaceBetween,
+                  SingleChildScrollView(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        // ----- Manual Entry Form -----
+                        const SizedBox(height: 8),
+                        const Text(
+                          'Connect Manually',
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 14,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        TextField(
+                          controller: _ipController,
+                          decoration: const InputDecoration(
+                            labelText: 'IP Address',
+                            hintText: 'e.g. 192.168.1.100',
+                            border: OutlineInputBorder(),
+                            isDense: true,
+                          ),
+                          keyboardType: TextInputType.url,
+                          enabled: !_manualConnecting,
+                        ),
+                        const SizedBox(height: 8),
+                        TextField(
+                          controller: _portController,
+                          decoration: const InputDecoration(
+                            labelText: 'Port',
+                            border: OutlineInputBorder(),
+                            isDense: true,
+                          ),
+                          keyboardType: TextInputType.number,
+                          enabled: !_manualConnecting,
+                        ),
+                        const SizedBox(height: 8),
+                        TextField(
+                          controller: _nameController,
+                          decoration: const InputDecoration(
+                            labelText: 'Printer Name',
+                            hintText: 'e.g. Kitchen Printer',
+                            border: OutlineInputBorder(),
+                            isDense: true,
+                          ),
+                          enabled: !_manualConnecting,
+                        ),
+                        const SizedBox(height: 12),
+                        SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton.icon(
+                            onPressed: _manualConnecting ? null : _manualConnect,
+                            icon: _manualConnecting
+                                ? const SizedBox(
+                                    width: 18,
+                                    height: 18,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : const Icon(Icons.cable),
+                            label: Text(
+                              _manualConnecting
+                                  ? 'Connecting...'
+                                  : 'Connect',
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        const Divider(),
+                        const SizedBox(height: 4),
+
+                        // ----- Scan Results -----
+                        _ethernetLoading
+                            ? const Padding(
+                                padding: EdgeInsets.symmetric(vertical: 16.0),
+                                child: CircularProgressIndicator(),
+                              )
+                            : _ethernetDevices.isEmpty
+                                ? Column(
+                                    mainAxisSize: MainAxisSize.min,
                                     children: [
-                                      Text(
-                                        'Found ${_ethernetDevices.length} device(s)',
-                                        style: Theme.of(context)
-                                            .textTheme
-                                            .bodySmall,
+                                      const Text(
+                                        'No printers found via scan.',
+                                        textAlign: TextAlign.center,
                                       ),
+                                      const SizedBox(height: 8),
                                       TextButton.icon(
                                         onPressed: _scanEthernet,
-                                        icon: const Icon(
-                                          Icons.refresh,
-                                          size: 18,
-                                        ),
-                                        label: const Text('Rescan'),
+                                        icon: const Icon(Icons.search),
+                                        label: const Text('Scan Network'),
+                                      ),
+                                    ],
+                                  )
+                                : Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Row(
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.spaceBetween,
+                                        children: [
+                                          Text(
+                                            'Found ${_ethernetDevices.length} device(s)',
+                                            style: Theme.of(context)
+                                                .textTheme
+                                                .bodySmall,
+                                          ),
+                                          TextButton.icon(
+                                            onPressed: _scanEthernet,
+                                            icon: const Icon(
+                                              Icons.refresh,
+                                              size: 18,
+                                            ),
+                                            label: const Text('Rescan'),
+                                          ),
+                                        ],
+                                      ),
+                                      ListView.builder(
+                                        shrinkWrap: true,
+                                        physics:
+                                            const NeverScrollableScrollPhysics(),
+                                        itemCount: _ethernetDevices.length,
+                                        itemBuilder: (context, index) {
+                                          final device =
+                                              _ethernetDevices[index];
+                                          final String ip =
+                                              device['ip'] as String;
+                                          final int port =
+                                              device['port'] as int;
+                                          final String? devName =
+                                              device['name'] as String?;
+
+                                          return ListTile(
+                                            leading: Icon(
+                                              devName != null
+                                                  ? Icons.print
+                                                  : Icons.lan,
+                                            ),
+                                            title: Text(devName ?? ip),
+                                            subtitle: Text('$ip:$port'),
+                                            trailing: devName != null
+                                                ? null
+                                                : const Icon(
+                                                    Icons.edit,
+                                                    size: 18,
+                                                  ),
+                                            onTap: () => _connectEthernet(
+                                              ip,
+                                              port,
+                                              devName,
+                                            ),
+                                          );
+                                        },
                                       ),
                                     ],
                                   ),
-                                ),
-                                Expanded(
-                                  child: ListView.builder(
-                                    itemCount: _ethernetDevices.length,
-                                    itemBuilder: (context, index) {
-                                      final device = _ethernetDevices[index];
-                                      final String ip =
-                                          device['ip'] as String;
-                                      final int port =
-                                          device['port'] as int;
-                                      final String? name =
-                                          device['name'] as String?;
-
-                                      return ListTile(
-                                        leading: Icon(
-                                          name != null
-                                              ? Icons.print
-                                              : Icons.lan,
-                                        ),
-                                        title: Text(
-                                          name ?? ip,
-                                        ),
-                                        subtitle: Text('$ip:$port'),
-                                        trailing: name != null
-                                            ? null
-                                            : const Icon(
-                                                Icons.edit,
-                                                size: 18,
-                                              ),
-                                        onTap: () => _connectEthernet(
-                                          ip,
-                                          port,
-                                          name,
-                                        ),
-                                      );
-                                    },
-                                  ),
-                                ),
-                              ],
-                            ),
+                      ],
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -336,7 +474,7 @@ class _NamePromptDialogState extends State<_NamePromptDialog> {
       content: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text('Give this printer a name:'),
+          const Text('Give this printer a name:'),
           const SizedBox(height: 4),
           Text(
             widget.ip,
