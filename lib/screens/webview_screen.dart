@@ -546,12 +546,25 @@ class _WebViewScreenState extends State<WebViewScreen> {
           !isCopy && (paymentMethod == 'cash' || paymentMethod == 'kontant');
 
       // Determine which printer is connected (Ethernet or USB).
-      // Try the last-used type first, then the other.
+      // Always call ensureConnected() for Ethernet to verify socket health,
+      // because many thermal printers close the TCP connection after each print
+      // job, leaving a stale _isConnected = true but a dead socket.
       bool printerReady = false;
 
-      if (_activePrinterType == 'ethernet' &&
-          _ethernetPrinterService.isConnected) {
-        printerReady = true;
+      if (_activePrinterType == 'ethernet') {
+        final bool ethernetReady =
+            await _ethernetPrinterService.ensureConnected();
+        if (ethernetReady) {
+          printerReady = true;
+        } else {
+          // Ethernet failed — fall back to USB.
+          final bool usbReady =
+              await _usbPrinterService.ensureConnected();
+          if (usbReady) {
+            _activePrinterType = 'usb';
+            printerReady = true;
+          }
+        }
       } else if (_activePrinterType == 'usb' &&
           _usbPrinterService.isConnected) {
         printerReady = true;

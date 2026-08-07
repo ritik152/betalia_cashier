@@ -225,17 +225,28 @@ class EthernetPrinterService extends ChangeNotifier {
 
   /// Tries to auto-connect to the last-used Ethernet printer.
   ///
-  /// * Returns `true` immediately if already connected.
+  /// * Returns `true` immediately if already connected AND socket is healthy.
   /// * If a connection is in progress, waits for it to finish (up to 15s).
   /// * Only tries the persisted IP — no blind fallback.
   /// * Returns `false` when no saved printer is found or it's unreachable.
   Future<bool> ensureConnected() async {
-    if (_isConnected) {
-      debugPrint('EthernetPrinterService: already connected');
-      return true;
+    if (_isConnected && _socket != null) {
+      // Verify the socket is actually still alive before trusting the flag.
+      // Many thermal printers close the TCP connection after each print job,
+      // leaving a stale socket reference and a useless _isConnected = true.
+      try {
+        await _socket!.flush();
+        debugPrint('EthernetPrinterService: already connected (socket verified)');
+        return true;
+      } catch (_) {
+        // Socket write failed → connection is dead, reset and reconnect.
+        debugPrint('EthernetPrinterService: stale socket detected, reconnecting...');
+        _resetConnectionState();
+      }
     }
 
-    if (_isConnecting) {
+    // If not connected or socket proven dead, proceed with fresh connection.
+    if (!_isConnected && _isConnecting) {
       debugPrint('EthernetPrinterService: connection in progress, waiting...');
       int waitedMs = 0;
       while (_isConnecting && waitedMs < 15000) {
@@ -279,6 +290,7 @@ class EthernetPrinterService extends ChangeNotifier {
           'port': savedPort,
           'name': names[savedIp],
         };
+        _isConnected = true;
         debugPrint(
           'EthernetPrinterService: auto-connected to ${names[savedIp] ?? savedIp}:$savedPort',
         );
@@ -524,7 +536,7 @@ class EthernetPrinterService extends ChangeNotifier {
         ),
       ]);
       bytes += generator.row(<PosColumn>[
-        PosColumn(text: 'Terminal -', width: 6),
+        PosColumn(text: 'Terminal :', width: 6),
         PosColumn(
           text: stripEmojis('${order['terminalSerialNumber'] ?? order['deviceId'] ?? ''}'),
           width: 6,

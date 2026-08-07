@@ -379,7 +379,7 @@ class UsbPrinterService extends ChangeNotifier {
         ),
       ]);
       bytes += generator.row([
-        PosColumn(text: 'Terminal -', width: 6),
+        PosColumn(text: 'Terminal :', width: 6),
         PosColumn(
           text: stripEmojis('${order['terminalSerialNumber'] ?? order['deviceId'] ?? ''}'),
           width: 6,
