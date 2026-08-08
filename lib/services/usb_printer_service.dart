@@ -349,6 +349,30 @@ class UsbPrinterService extends ChangeNotifier {
         );
       }
 
+      final String createdAtStr =
+          order['createdAt']?.toString() ?? DateTime.now().toIso8601String();
+      try {
+        final DateTime dt = DateTime.parse(createdAtStr);
+        const List<String> months = [
+          'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+          'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+        ];
+        final String formattedDate =
+            '${dt.day.toString().padLeft(2, '0')} '
+            '${months[dt.month - 1]} ${dt.year} '
+            'at ${dt.hour.toString().padLeft(2, '0')}:'
+            '${dt.minute.toString().padLeft(2, '0')}';
+        bytes += generator.text(
+          formattedDate,
+          styles: const PosStyles(align: PosAlign.center),
+        );
+      } catch (_) {
+        bytes += generator.text(
+          stripEmojis(createdAtStr),
+          styles: const PosStyles(align: PosAlign.center),
+        );
+      }
+
       bytes += generator.hr();
 
       // =====================================================================
@@ -677,34 +701,10 @@ class UsbPrinterService extends ChangeNotifier {
         stripEmojis(receiptMessage),
         styles: const PosStyles(align: PosAlign.center, bold: true),
       );
-      bytes += generator.text(
-        stripEmojis(vendorName),
-        styles: const PosStyles(align: PosAlign.center),
-      );
-
-      final String createdAtStr =
-          order['createdAt']?.toString() ?? DateTime.now().toIso8601String();
-      try {
-        final DateTime dt = DateTime.parse(createdAtStr);
-        const List<String> months = [
-          'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-          'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-        ];
-        final String formattedDate =
-            '${dt.day.toString().padLeft(2, '0')} '
-            '${months[dt.month - 1]} ${dt.year} '
-            'at ${dt.hour.toString().padLeft(2, '0')}:'
-            '${dt.minute.toString().padLeft(2, '0')}';
-        bytes += generator.text(
-          formattedDate,
-          styles: const PosStyles(align: PosAlign.center),
-        );
-      } catch (_) {
-        bytes += generator.text(
-          stripEmojis(createdAtStr),
-          styles: const PosStyles(align: PosAlign.center),
-        );
-      }
+      // bytes += generator.text(
+      //   stripEmojis(vendorName),
+      //   styles: const PosStyles(align: PosAlign.center),
+      // );
 
       if (vendor['website'] != null &&
           (vendor['website'] as String).trim().isNotEmpty) {
