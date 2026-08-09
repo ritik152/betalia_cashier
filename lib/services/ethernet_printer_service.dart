@@ -518,7 +518,9 @@ class EthernetPrinterService extends ChangeNotifier {
             '${dt.day.toString().padLeft(2, '0')} '
             '${months[dt.month - 1]} ${dt.year} '
             'at ${dt.hour.toString().padLeft(2, '0')}:'
-            '${dt.minute.toString().padLeft(2, '0')}';
+            '${dt.minute.toString().padLeft(2, '0')}:'
+            '${dt.second.toString().padLeft(2, '0')}';
+            // '${dt.millisecond.toString().padLeft(3, '0')}';
         bytes += generator.text(
           formattedDate,
           styles: const PosStyles(align: PosAlign.center),
@@ -562,7 +564,7 @@ class EthernetPrinterService extends ChangeNotifier {
       bytes += generator.row(<PosColumn>[
         PosColumn(text: 'Terminal :', width: 6),
         PosColumn(
-          text: stripEmojis('${order['terminalSerialNumber'] ?? order['deviceId'] ?? ''}'),
+          text: stripEmojis('${order['posDeviceId'] ?? order['deviceId'] ?? ''}'),
           width: 6,
           styles: const PosStyles(align: PosAlign.right, bold: true),
         ),

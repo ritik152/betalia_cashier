@@ -284,6 +284,24 @@ class UsbPrinterService extends ChangeNotifier {
       final generator = Generator(PaperSize.mm80, profile);
       List<int> bytes = [];
 
+
+      final String receiptLabel = 'SALGSKVITTERING';
+      bytes += generator.text(
+        stripEmojis(receiptLabel),
+        styles: const PosStyles(align: PosAlign.center, bold: true),
+      );
+
+      final bool isCopy = order['isCopy'] == true;
+      final String receiptCopyLabel = '*** KOPI ***';
+      if (isCopy) {
+        bytes += generator.text(
+          stripEmojis(receiptCopyLabel),
+          styles: const PosStyles(align: PosAlign.center, bold: true),
+        );
+      }
+
+      bytes += generator.hr();
+
       // =====================================================================
       // 1. VENDOR HEADER BLOCK
       // =====================================================================
@@ -329,13 +347,6 @@ class UsbPrinterService extends ChangeNotifier {
       // =====================================================================
       // 2. RECEIPT META TITLE BLOCK
       // =====================================================================
-      final bool isCopy = order['isCopy'] == true;
-      final String receiptLabel =
-          isCopy ? 'KOPIKVITTERING' : 'SALGSKVITTERING';
-      bytes += generator.text(
-        stripEmojis(receiptLabel),
-        styles: const PosStyles(align: PosAlign.center, bold: true),
-      );
       bytes += generator.text(
         stripEmojis('Receipt - ${order['orderNumber'] ?? ''}'),
         styles: const PosStyles(align: PosAlign.center, bold: true),
@@ -361,7 +372,9 @@ class UsbPrinterService extends ChangeNotifier {
             '${dt.day.toString().padLeft(2, '0')} '
             '${months[dt.month - 1]} ${dt.year} '
             'at ${dt.hour.toString().padLeft(2, '0')}:'
-            '${dt.minute.toString().padLeft(2, '0')}';
+            '${dt.minute.toString().padLeft(2, '0')}:'
+            '${dt.second.toString().padLeft(2, '0')}';
+            // '${dt.millisecond.toString().padLeft(3, '0')}';
         bytes += generator.text(
           formattedDate,
           styles: const PosStyles(align: PosAlign.center),
@@ -405,7 +418,7 @@ class UsbPrinterService extends ChangeNotifier {
       bytes += generator.row([
         PosColumn(text: 'Terminal :', width: 6),
         PosColumn(
-          text: stripEmojis('${order['terminalSerialNumber'] ?? order['deviceId'] ?? ''}'),
+          text: stripEmojis('${order['posDeviceId'] ?? order['deviceId'] ?? ''}'),
           width: 6,
           styles: const PosStyles(align: PosAlign.right, bold: true),
         ),
