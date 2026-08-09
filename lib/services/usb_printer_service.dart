@@ -285,7 +285,7 @@ class UsbPrinterService extends ChangeNotifier {
       List<int> bytes = [];
 
 
-      final String receiptLabel = 'SALGSKVITTERING';
+      final String receiptLabel = '* SALGSKVITTERING *';
       bytes += generator.text(
         stripEmojis(receiptLabel),
         styles: const PosStyles(align: PosAlign.center, bold: true),

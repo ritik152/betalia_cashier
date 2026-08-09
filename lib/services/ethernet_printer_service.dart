@@ -441,6 +441,22 @@ class EthernetPrinterService extends ChangeNotifier {
       final generator = Generator(PaperSize.mm80, profile);
       List<int> bytes = <int>[];
 
+
+      final String receiptLabel = '* SALGSKVITTERING *';
+      bytes += generator.text(
+        stripEmojis(receiptLabel),
+        styles: const PosStyles(align: PosAlign.center, bold: true),
+      );
+
+      final bool isCopy = order['isCopy'] == true;
+      final String receiptCopyLabel = '*** KOPI ***';
+      if (isCopy) {
+        bytes += generator.text(
+          stripEmojis(receiptCopyLabel),
+          styles: const PosStyles(align: PosAlign.center, bold: true),
+        );
+      }
+
       // =====================================================================
       // 1. VENDOR HEADER BLOCK
       // =====================================================================
@@ -486,13 +502,13 @@ class EthernetPrinterService extends ChangeNotifier {
       // =====================================================================
       // 2. RECEIPT META TITLE BLOCK
       // =====================================================================
-      final bool isCopy = order['isCopy'] == true;
-      final String receiptLabel =
-          isCopy ? 'KOPIKVITTERING' : 'SALGSKVITTERING';
-      bytes += generator.text(
-        stripEmojis(receiptLabel),
-        styles: const PosStyles(align: PosAlign.center, bold: true),
-      );
+      // final bool isCopy = order['isCopy'] == true;
+      // final String receiptLabel =
+      //     isCopy ? 'KOPIKVITTERING' : 'SALGSKVITTERING';
+      // bytes += generator.text(
+      //   stripEmojis(receiptLabel),
+      //   styles: const PosStyles(align: PosAlign.center, bold: true),
+      // );
       bytes += generator.text(
         stripEmojis('Receipt - ${order['orderNumber'] ?? ''}'),
         styles: const PosStyles(align: PosAlign.center, bold: true),
