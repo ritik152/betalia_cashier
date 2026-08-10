@@ -230,23 +230,16 @@ class EthernetPrinterService extends ChangeNotifier {
   /// * Only tries the persisted IP — no blind fallback.
   /// * Returns `false` when no saved printer is found or it's unreachable.
   Future<bool> ensureConnected() async {
-    if (_isConnected && _socket != null) {
-      // Verify the socket is actually still alive before trusting the flag.
-      // Many thermal printers close the TCP connection after each print job,
-      // leaving a stale socket reference and a useless _isConnected = true.
-      try {
-        await _socket!.flush();
-        debugPrint('EthernetPrinterService: already connected (socket verified)');
-        return true;
-      } catch (_) {
-        // Socket write failed → connection is dead, reset and reconnect.
-        debugPrint('EthernetPrinterService: stale socket detected, reconnecting...');
-        _resetConnectionState();
-      }
+    // Many thermal printers close the TCP connection after each print job,
+    // leaving a stale socket reference. Always recreate the connection to
+    // guarantee a live socket before every print.
+    if (_isConnected || _socket != null) {
+      debugPrint('EthernetPrinterService: resetting existing connection for fresh reconnect...');
+      _resetConnectionState();
     }
 
-    // If not connected or socket proven dead, proceed with fresh connection.
-    if (!_isConnected && _isConnecting) {
+    // If a connection is in progress, wait for it to finish.
+    if (_isConnecting) {
       debugPrint('EthernetPrinterService: connection in progress, waiting...');
       int waitedMs = 0;
       while (_isConnecting && waitedMs < 15000) {
@@ -450,6 +443,7 @@ class EthernetPrinterService extends ChangeNotifier {
 
       final bool isCopy = order['isCopy'] == true;
       final String receiptCopyLabel = '*** KOPI ***';
+      
       if (isCopy) {
         bytes += generator.text(
           stripEmojis(receiptCopyLabel),
