@@ -109,7 +109,7 @@ class _WebViewScreenState extends State<WebViewScreen> {
         ),
       )
       ..loadRequest(
-        Uri.parse('https://betalia.no/bakeri/cashier'),
+        Uri.parse('http://192.168.1.3:3000/bakeri/cashier'),
       );
 
     // Configure Android WebView for sharp rendering on tablet screens.

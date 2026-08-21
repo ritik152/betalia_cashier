@@ -58,3 +58,9 @@ String stripEmojis(String text) {
 
   return text.replaceAll(emojiRegex, '').trim();
 }
+
+/// Parses a persisted ISO timestamp and converts it to the printer device's
+/// local timezone before receipt fields read its date and clock components.
+DateTime parsePrinterTimestamp(String timestamp) {
+  return DateTime.parse(timestamp).toLocal();
+}

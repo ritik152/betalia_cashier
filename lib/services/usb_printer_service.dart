@@ -363,7 +363,7 @@ class UsbPrinterService extends ChangeNotifier {
       final String createdAtStr =
           order['createdAt']?.toString() ?? DateTime.now().toIso8601String();
       try {
-        final DateTime dt = DateTime.parse(createdAtStr);
+        final DateTime dt = parsePrinterTimestamp(createdAtStr);
         const List<String> months = [
           'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
           'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',

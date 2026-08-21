@@ -1,4 +1,5 @@
 import 'package:betalia_cashier/screens/webview_screen.dart';
+import 'package:betalia_cashier/services/notification_service.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -40,7 +41,9 @@ void _addDebugError(String source, String message, [String? details]) {
 }
 
 // ── Main Entry ────────────────────────────────────────────────────────────────
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
   // ── Global error handlers (prevent crashes, show errors instead) ──
   FlutterError.onError = (FlutterErrorDetails details) {
     // Log to console
@@ -67,37 +70,65 @@ void main() {
     debugPrint('${stack ?? StackTrace.empty}');
     debugPrint('═══════════════════════════════════════════════════════');
 
-    _addDebugError(
-      'Async',
-      error.toString(),
-      stack?.toString(),
-    );
+    _addDebugError('Async', error.toString(), stack?.toString());
 
     // Return true to prevent crash in debug mode
     return kDebugMode;
   };
 
-  WidgetsFlutterBinding.ensureInitialized();
+  // Start the order-notification foreground service (polls in the background
+  // even when the app is paused/killed) and initialize local notifications.
+  try {
+    await NotificationService.instance.initialize();
+    await NotificationService.instance.initializeBackgroundService();
+  } catch (error, stack) {
+    debugPrint('Unable to initialize order notifications: $error');
+    _addDebugError('Notifications', error.toString(), stack.toString());
+  }
 
   // Hide status bar and navigation bar
-  SystemChrome.setEnabledSystemUIMode(
-    SystemUiMode.immersiveSticky,
-  );
+  SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
 
   runApp(const MyApp());
 }
 
-class MyApp extends StatelessWidget {
+class MyApp extends StatefulWidget {
   const MyApp({super.key});
+
+  @override
+  State<MyApp> createState() => _MyAppState();
+}
+
+class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      NotificationService.instance.setAppInForeground(true);
+    });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    NotificationService.instance.setAppInForeground(
+      state == AppLifecycleState.resumed,
+    );
+  }
+
+  @override
+  void dispose() {
+    NotificationService.instance.setAppInForeground(false);
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Betalia Cashier',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        useMaterial3: true,
-      ),
+      theme: ThemeData(useMaterial3: true),
       home: const DebugErrorWrapper(child: WebViewScreen()),
     );
   }
@@ -151,9 +182,7 @@ class _DebugErrorWrapperState extends State<DebugErrorWrapper> {
                 setState(() => _expanded = !_expanded);
               },
               child: Container(
-                constraints: BoxConstraints(
-                  maxHeight: _expanded ? 300 : 40,
-                ),
+                constraints: BoxConstraints(maxHeight: _expanded ? 300 : 40),
                 decoration: BoxDecoration(
                   color: Colors.yellow.shade900.withAlpha(240),
                   borderRadius: const BorderRadius.only(
@@ -166,11 +195,17 @@ class _DebugErrorWrapperState extends State<DebugErrorWrapper> {
                   children: [
                     // Collapsed header
                     Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 8,
+                      ),
                       child: Row(
                         children: [
-                          const Icon(Icons.warning_amber_rounded,
-                              color: Colors.yellow, size: 16),
+                          const Icon(
+                            Icons.warning_amber_rounded,
+                            color: Colors.yellow,
+                            size: 16,
+                          ),
                           const SizedBox(width: 6),
                           Text(
                             '${debugErrors.length} Debug Error${debugErrors.length != 1 ? 's' : ''}',
@@ -183,7 +218,10 @@ class _DebugErrorWrapperState extends State<DebugErrorWrapper> {
                           const Spacer(),
                           Text(
                             _expanded ? '▼ Collapse' : '▲ Expand',
-                            style: const TextStyle(color: Colors.yellow, fontSize: 11),
+                            style: const TextStyle(
+                              color: Colors.yellow,
+                              fontSize: 11,
+                            ),
                           ),
                           const SizedBox(width: 8),
                           GestureDetector(
@@ -216,11 +254,14 @@ class _DebugErrorWrapperState extends State<DebugErrorWrapper> {
                                 '${error.timestamp.hour.toString().padLeft(2, '0')}:${error.timestamp.minute.toString().padLeft(2, '0')}:${error.timestamp.second.toString().padLeft(2, '0')}';
                             return Container(
                               padding: const EdgeInsets.symmetric(
-                                  horizontal: 12, vertical: 4),
+                                horizontal: 12,
+                                vertical: 4,
+                              ),
                               decoration: BoxDecoration(
                                 border: Border(
                                   top: BorderSide(
-                                      color: Colors.yellow.withAlpha(60)),
+                                    color: Colors.yellow.withAlpha(60),
+                                  ),
                                 ),
                               ),
                               child: Column(
@@ -230,11 +271,14 @@ class _DebugErrorWrapperState extends State<DebugErrorWrapper> {
                                     children: [
                                       Container(
                                         padding: const EdgeInsets.symmetric(
-                                            horizontal: 4, vertical: 1),
+                                          horizontal: 4,
+                                          vertical: 1,
+                                        ),
                                         decoration: BoxDecoration(
                                           color: Colors.red.withAlpha(80),
-                                          borderRadius:
-                                              BorderRadius.circular(3),
+                                          borderRadius: BorderRadius.circular(
+                                            3,
+                                          ),
                                         ),
                                         child: Text(
                                           error.source,
