@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:betalia_cashier/screens/webview_screen.dart';
 import 'package:betalia_cashier/services/notification_service.dart';
 import 'package:flutter/foundation.dart';
@@ -106,6 +108,9 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       NotificationService.instance.setAppInForeground(true);
+      unawaited(
+        NotificationService.instance.requestBatteryOptimizationExemptionOnce(),
+      );
     });
   }
 

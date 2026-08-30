@@ -1,13 +1,21 @@
 package com.example.betalia_cashier
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.os.PowerManager
+import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import com.verifone.payment_sdk.*
+import id.flutter.flutter_background_service.FlutterBackgroundServicePlugin
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import kotlinx.coroutines.*
+import org.json.JSONObject
 import java.math.BigDecimal
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -17,6 +25,7 @@ class MainActivity : FlutterActivity() {
     companion object {
         private const val TAG = "Verifone"
         private const val CHANNEL_NAME = "com.betalia.payments/p630"
+        private const val POWER_MANAGEMENT_CHANNEL_NAME = "com.betalia.notifications/power"
         private const val DEFAULT_INSTANCE_ID = "counter-terminal"
         private const val LOGIN_TIMEOUT_MS = 30_000L
         private const val SESSION_TIMEOUT_MS = 15_000L
@@ -85,6 +94,32 @@ class MainActivity : FlutterActivity() {
 
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
+            POWER_MANAGEMENT_CHANNEL_NAME
+        ).setMethodCallHandler { call, result ->
+            try {
+                when (call.method) {
+                    "isIgnoringBatteryOptimizations" -> {
+                        result.success(isIgnoringBatteryOptimizations())
+                    }
+
+                    "requestIgnoreBatteryOptimizations" -> {
+                        result.success(requestIgnoreBatteryOptimizations())
+                    }
+
+                    else -> result.notImplemented()
+                }
+            } catch (throwable: Throwable) {
+                Log.e(TAG, "Power-management MethodChannel error", throwable)
+                result.error(
+                    "POWER_MANAGEMENT_ERROR",
+                    throwable.localizedMessage ?: "Unable to open battery settings",
+                    null
+                )
+            }
+        }
+
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
             CHANNEL_NAME
         ).setMethodCallHandler { call, result ->
             try {
@@ -145,6 +180,60 @@ class MainActivity : FlutterActivity() {
                     null
                 )
             }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        sendCashierAppLifecycle(true)
+    }
+
+    override fun onPause() {
+        sendCashierAppLifecycle(false)
+        super.onPause()
+    }
+
+    override fun onStop() {
+        sendCashierAppLifecycle(false)
+        super.onStop()
+    }
+
+    private fun sendCashierAppLifecycle(isForeground: Boolean) {
+        try {
+            val servicePipe = FlutterBackgroundServicePlugin.servicePipe
+            if (!servicePipe.hasListener()) return
+
+            val payload = JSONObject().apply {
+                put("method", "appLifecycle")
+                put("args", JSONObject().put("isForeground", isForeground))
+            }
+            servicePipe.invoke(payload)
+        } catch (throwable: Throwable) {
+            Log.w(TAG, "Unable to update notification-service lifecycle", throwable)
+        }
+    }
+
+    private fun isIgnoringBatteryOptimizations(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        return powerManager.isIgnoringBatteryOptimizations(packageName)
+    }
+
+    private fun requestIgnoreBatteryOptimizations(): Boolean {
+        if (isIgnoringBatteryOptimizations()) return true
+
+        val packageUri = Uri.parse("package:$packageName")
+        return try {
+            startActivity(
+                Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                    data = packageUri
+                }
+            )
+            true
+        } catch (directRequestError: Exception) {
+            Log.w(TAG, "Direct battery exemption prompt unavailable", directRequestError)
+            startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+            true
         }
     }
 

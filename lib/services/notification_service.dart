@@ -1,13 +1,40 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_app_badger/flutter_app_badger.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+
+@pragma('vm:entry-point')
+Future<bool> cashierNotificationIosBackground(ServiceInstance service) async {
+  WidgetsFlutterBinding.ensureInitialized();
+  try {
+    DartPluginRegistrant.ensureInitialized();
+  } catch (error) {
+    debugPrint('NotificationService iOS plugin registration warning: $error');
+  }
+  return true;
+}
+
+@pragma('vm:entry-point')
+void cashierNotificationServiceEntrypoint(ServiceInstance service) async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  try {
+    // BackgroundService creates a FlutterEngine and registers native plugins
+    // before this callback. Calling DartPluginRegistrant again also attempts to
+    // load flutter_background_service's UI-only implementation in this isolate.
+    await NotificationService.instance.runBackgroundService(service);
+  } catch (error, stack) {
+    debugPrint('NotificationService entrypoint error: $error\n$stack');
+  }
+}
 
 class NotificationService {
   NotificationService._();
@@ -15,7 +42,7 @@ class NotificationService {
   static final NotificationService instance = NotificationService._();
 
   static const String handle = 'bakeri';
-  static const String apiBase = 'http://192.168.1.3:3001';
+  static const String apiBase = 'https://api.betalia.no';
   static const Duration pollInterval = Duration(seconds: 15);
 
   // The service notification is intentionally quiet. Order alerts use a new,
@@ -25,6 +52,13 @@ class NotificationService {
   static const String _orderAlertChannelId = 'betalia_order_alerts_v2';
   static const String _deliveredNotificationIdsKey =
       'cashier_delivered_notification_ids_v2';
+  static const String _notificationBaselineReadyKey =
+      'cashier_notification_baseline_ready_v2';
+  static const String _batteryPromptedKey =
+      'cashier_battery_optimization_prompted_v1';
+  static const MethodChannel _powerManagementChannel = MethodChannel(
+    'com.betalia.notifications/power',
+  );
 
   final FlutterLocalNotificationsPlugin _localNotifications =
       FlutterLocalNotificationsPlugin();
@@ -34,6 +68,10 @@ class NotificationService {
   bool _isAppInForeground = false;
   int? _lastUnreadCount;
   ServiceInstance? _serviceInstance;
+  bool _backgroundServiceStarted = false;
+  Timer? _pollTimer;
+  StreamSubscription<dynamic>? _stopServiceSubscription;
+  StreamSubscription<dynamic>? _appLifecycleSubscription;
 
   Future<void> initialize({bool requestPermission = true}) async {
     if (!_notificationsReady) {
@@ -85,7 +123,7 @@ class NotificationService {
 
     await service.configure(
       androidConfiguration: AndroidConfiguration(
-        onStart: onServiceStart,
+        onStart: cashierNotificationServiceEntrypoint,
         autoStart: true,
         autoStartOnBoot: true,
         isForegroundMode: true,
@@ -99,8 +137,8 @@ class NotificationService {
       // app's foreground web UI remains responsible there.
       iosConfiguration: IosConfiguration(
         autoStart: false,
-        onForeground: onServiceStart,
-        onBackground: onIosBackground,
+        onForeground: cashierNotificationServiceEntrypoint,
+        onBackground: cashierNotificationIosBackground,
       ),
     );
 
@@ -119,26 +157,52 @@ class NotificationService {
     });
   }
 
-  @pragma('vm:entry-point')
-  static Future<bool> onIosBackground(ServiceInstance service) async {
-    WidgetsFlutterBinding.ensureInitialized();
-    DartPluginRegistrant.ensureInitialized();
-    return true;
+  Future<void> requestBatteryOptimizationExemptionOnce() async {
+    if (!Platform.isAndroid) return;
+
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      if (preferences.getBool(_batteryPromptedKey) == true) return;
+
+      final isExempt =
+          await _powerManagementChannel.invokeMethod<bool>(
+            'isIgnoringBatteryOptimizations',
+          ) ??
+          false;
+      if (isExempt) {
+        await preferences.setBool(_batteryPromptedKey, true);
+        return;
+      }
+
+      final promptOpened =
+          await _powerManagementChannel.invokeMethod<bool>(
+            'requestIgnoreBatteryOptimizations',
+          ) ??
+          false;
+      if (promptOpened) {
+        await preferences.setBool(_batteryPromptedKey, true);
+      }
+    } catch (error) {
+      // Retry on a later launch if the native prompt could not be opened.
+      debugPrint('NotificationService battery exemption error: $error');
+    }
   }
 
-  @pragma('vm:entry-point')
-  static void onServiceStart(ServiceInstance service) async {
-    WidgetsFlutterBinding.ensureInitialized();
-    DartPluginRegistrant.ensureInitialized();
+  Future<void> runBackgroundService(ServiceInstance service) async {
+    _serviceInstance = service;
+    if (_backgroundServiceStarted) return;
+    _backgroundServiceStarted = true;
 
-    final notificationService = NotificationService.instance;
-    notificationService._serviceInstance = service;
+    await _stopServiceSubscription?.cancel();
+    await _appLifecycleSubscription?.cancel();
+    _pollTimer?.cancel();
 
-    service.on('stopService').listen((event) {
+    _stopServiceSubscription = service.on('stopService').listen((event) {
+      _pollTimer?.cancel();
       service.stopSelf();
     });
-    service.on('appLifecycle').listen((event) {
-      notificationService._isAppInForeground = event?['isForeground'] == true;
+    _appLifecycleSubscription = service.on('appLifecycle').listen((event) {
+      _isAppInForeground = event?['isForeground'] == true;
     });
 
     if (service is AndroidServiceInstance) {
@@ -155,21 +219,19 @@ class NotificationService {
 
     // Notification plugin registration must not be able to stop the HTTP poll.
     try {
-      await notificationService.initialize(requestPermission: false);
+      await initialize(requestPermission: false);
     } catch (error, stack) {
-      notificationService._notificationsReady = false;
+      _notificationsReady = false;
       debugPrint('NotificationService initialization error: $error\n$stack');
-      await notificationService._updateServiceStatus(
-        'Alert setup failed; polling will retry',
-      );
+      await _updateServiceStatus('Alert setup failed; polling will retry');
     }
 
     // Allow the foreground lifecycle event from main() to arrive before the
     // first canonical-list delivery check.
     await Future<void>.delayed(const Duration(milliseconds: 750));
-    await notificationService.pollNow();
-    Timer.periodic(pollInterval, (_) {
-      unawaited(notificationService.pollNow());
+    await pollNow();
+    _pollTimer = Timer.periodic(pollInterval, (_) {
+      unawaited(pollNow());
     });
   }
 
@@ -258,6 +320,20 @@ class NotificationService {
         .map((notification) => notification['_id']?.toString())
         .whereType<String>()
         .toSet();
+
+    // A freshly installed/upgraded service must establish today's canonical
+    // IDs before alerting. This avoids replaying the whole day if Android opens
+    // the battery approval screen and moves the cashier app to the background
+    // during the service's first poll.
+    if (preferences.getBool(_notificationBaselineReadyKey) != true) {
+      await preferences.setStringList(
+        _deliveredNotificationIdsKey,
+        currentIds.toList(),
+      );
+      await preferences.setBool(_notificationBaselineReadyKey, true);
+      return;
+    }
+
     final deliveredIds =
         (preferences.getStringList(_deliveredNotificationIdsKey) ?? <String>[])
             .toSet()
